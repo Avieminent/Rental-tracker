@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Eminent Care Group — Equipment Rental Tracker</title>
+
+    <!-- Styling. The app uses Tailwind utility classes; this loads them.
+         Fine for an internal tool. (A larger production app would compile
+         Tailwind instead of using this CDN, but this just works.) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Point the app at your backend API.
+         Leave the value empty ("") if the API is served from the same address.
+         When you deploy, change this to your API's URL, e.g.
+         "https://ecg-api.onrender.com" -->
+    <script>
+      window.__ECG_API_URL__ = "http://localhost:4000";
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
