@@ -353,9 +353,12 @@ function TrackerModule({ facility, moduleKey, data, update }) {
   const [modal, setModal] = useState(null);
   const [importing, setImporting] = useState(false);
   const [q, setQ] = useState("");
-  const tab = cfg.tabs.find((t) => t.id === tabId);
+  // If the selected tab isn't part of this module (e.g. after switching
+  // modules), fall back to the first tab instead of crashing.
+  useEffect(() => { if (!cfg.tabs.some((t) => t.id === tabId)) setTabId(cfg.tabs[0].id); }, [moduleKey]);
+  const tab = cfg.tabs.find((t) => t.id === tabId) || cfg.tabs[0];
   const rowsByTab = moduleRows(data, moduleKey, facility.id);
-  const rows = rowsByTab[tabId];
+  const rows = rowsByTab[tab.id] || [];
   const visible = tab.cols.filter((c) => !c.hideCol);
 
   const save = async (row) => {
