@@ -1471,9 +1471,8 @@ function PrivacyGate({ onAccept }) {
     <div className="min-h-screen flex items-center justify-center px-4 py-8" style={{ background: BRAND.paper, color: BRAND.ink }}>
       <div className="w-full max-w-lg">
         <div className="flex flex-col items-center text-center mb-5">
-          <Crown size={36} />
-          <div className="text-xl mt-2" style={{ fontFamily: SERIF }}>Eminent Care Group</div>
-          <div className="text-[11px] uppercase tracking-[0.22em]" style={{ color: BRAND.tanDeep }}>Operations Platform</div>
+          <img src={EMINENT_LOGO} alt="Eminent Care Group" className="h-16 w-auto object-contain" />
+          <div className="text-[11px] uppercase tracking-[0.22em] mt-2" style={{ color: BRAND.tanDeep }}>Operations Platform</div>
         </div>
         <div className="rounded-2xl overflow-hidden" style={{ background: BRAND.card, border: `1px solid ${BRAND.line}` }}>
           <div className="px-5 py-3 text-sm font-medium flex items-center gap-2" style={{ background: TONE.bad.bg, color: TONE.bad.fg }}>
