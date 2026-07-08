@@ -1600,6 +1600,7 @@ function Login({ onLogin }) {
   const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -1654,7 +1655,10 @@ function Login({ onLogin }) {
             <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Email</span>
               <input style={inpStyle} type="email" value={email} autoFocus onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
             <label className="block mb-4"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Password</span>
-              <input style={inpStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+              <div className="relative">
+                <input style={{ ...inpStyle, paddingRight: "3.5rem" }} type={showPw ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+                <button type="button" onClick={() => setShowPw((s) => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] uppercase tracking-wider px-1" style={{ color: BRAND.inkSoft }}>{showPw ? "Hide" : "Show"}</button>
+              </div></label>
             {err && <div className="text-xs mb-3" style={{ color: TONE.bad.fg }}>{err}</div>}
             <button onClick={submit} disabled={busy} className="w-full rounded-lg py-2.5 text-sm text-white" style={{ background: BRAND.ink, opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Sign in"}</button>
             <button onClick={() => { setMode("forgot"); setErr(""); }} className="block mx-auto text-xs mt-3 underline" style={{ color: BRAND.inkSoft }}>Forgot password?</button>
