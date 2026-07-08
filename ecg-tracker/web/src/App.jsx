@@ -867,7 +867,7 @@ function Facility({ facility, module, setModule, data, update }) {
   return (
     <div>
       <div className="flex flex-col items-center text-center mb-4">
-        {LOGOS[facility.name] ? <img src={LOGOS[facility.name]} alt={facility.name} className="h-16 sm:h-20 w-auto object-contain" />
+        {LOGOS[facility.name] ? <img src={LOGOS[facility.name]} alt={facility.name} className="h-[84px] sm:h-[104px] w-auto object-contain" />
           : <><Crown size={26} /><h2 className="text-2xl mt-1" style={{ fontFamily: SERIF }}>{facility.name}</h2>
             <div className="text-[10px] uppercase tracking-[0.28em]" style={{ color: BRAND.inkSoft }}>{facility.tagline}</div></>}
       </div>
