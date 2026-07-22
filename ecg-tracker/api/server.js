@@ -1,4 +1,3 @@
-
 // ============================================================
 // Eminent Central — Operations Platform API (v2)
 // Express + Postgres. Replaces the old rentals-only server.
@@ -36,6 +35,7 @@ const MAIL = {
   clientId: process.env.GRAPH_CLIENT_ID,
   clientSecret: process.env.GRAPH_CLIENT_SECRET,
   from: process.env.MAIL_FROM,
+  fromName: process.env.MAIL_FROM_NAME || "Eminent Central",
 };
 const mailConfigured = !!(MAIL.tenant && MAIL.clientId && MAIL.clientSecret && MAIL.from);
  
@@ -100,7 +100,12 @@ async function sendMail(to, subject, html) {
       method: "POST",
       headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        message: { subject, body: { contentType: "HTML", content: html }, toRecipients: [{ emailAddress: { address: to } }] },
+        message: {
+          subject,
+          body: { contentType: "HTML", content: html },
+          from: { emailAddress: { name: MAIL.fromName, address: MAIL.from } },
+          toRecipients: [{ emailAddress: { address: to } }],
+        },
         saveToSentItems: false,
       }),
     }
