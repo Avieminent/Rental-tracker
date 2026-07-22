@@ -2294,7 +2294,7 @@ function Facility({ facility, module, setModule, data, update, role, allowedPage
       {module === "rentals" && <Rentals facility={facility} data={data} update={update} />}
       {module === "roster" && <RosterModule key={facility.id} facility={facility} data={data} update={update} />}
       {module === "budget" && <DeptBudgetModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
-      {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "corporate"} />}
+      {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} />}
       {module === "rehosp" && <RehospModule key={facility.id} facility={facility} />}
       {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || role === "corporate"} />}
       {module === "staffing" && <StaffingModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
@@ -2726,7 +2726,7 @@ function IconBtn({ children, onClick, danger }) {
 }
 function Modal({ title, onClose, children, wide }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto" style={{ background: "rgba(27,34,56,0.45)" }} onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: "rgba(27,34,56,0.45)" }} onClick={onClose}>
       <div className={"w-full my-8 " + (wide ? "max-w-lg" : "max-w-md")} style={{ background: BRAND.card, borderRadius: 16 }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: `1px solid ${BRAND.line}` }}><h3 className="text-lg flex items-center gap-2" style={{ fontFamily: SERIF }}><Crown size={18} /> {title}</h3><button onClick={onClose} style={{ color: BRAND.inkSoft }}><X size={20} /></button></div>
         <div className="p-5">{children}</div>
