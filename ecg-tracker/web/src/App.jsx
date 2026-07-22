@@ -692,6 +692,9 @@ function BedboardModule({ facility: fac, canImport }){
       const byId = Object.fromEntries(rs.map(r => [r.id, r]));
       // snapshot the "person" payload for each mover before we overwrite anything
       const carry = (r) => ({ name:r.name, mf:r.mf, vent:r.vent, payer:r.payer, status:"Active", admit:r.admit||todayISO(), spend:r.spend||[], trust:r.trust, trustHistory:r.trustHistory, hosp:r.hosp||{}, disc:{}, death:{} });
+      // Guard: ignore any resident listed as a mover more than once (keep only their first move).
+      const seenMovers = new Set();
+      moves = moves.filter(m => { if (seenMovers.has(m.fromId)) return false; seenMovers.add(m.fromId); return true; });
       const payloads = {}; moves.forEach(m => { if (byId[m.fromId]) payloads[m.toId] = carry(byId[m.fromId]); });
       const movedFromBeds = new Set(moves.map(m => m.fromId));
       const landedBeds = new Set(moves.map(m => m.toId));
@@ -1157,6 +1160,8 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
   const problems = [];
   const dests = rows.map(r => r.toId).filter(Boolean);
   if (new Set(dests).size !== dests.length) problems.push("Two moves point to the same room.");
+  const movers = rows.map(r => r.fromId).filter(Boolean);
+  if (new Set(movers).size !== movers.length) problems.push("The same resident is being moved more than once.");
   rows.forEach((r, i) => { if (r.fromId && r.toId && r.fromId === r.toId) problems.push("A resident can't move to their own bed."); });
   const incomplete = rows.some(r => !r.fromId || !r.toId);
   // Every bumped resident (occupied bed used as a destination) must themselves be a mover.
@@ -1174,13 +1179,15 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
         {rows.map((r, idx) => {
           const used = usedDest(idx);
           const destOptions = beds.filter(b => b.id === r.toId || !used.has(b.id));
+          const usedMovers = new Set(rows.filter((_, i) => i !== idx).map(x => x.fromId).filter(Boolean));
+          const moverChoices = moverOptions.filter(b => b.id === r.fromId || !usedMovers.has(b.id));
           const auto = idx > 0 && rows.slice(0, idx).some(x => x.toId === r.fromId); // this row was auto-created by a bump
           return (
             <div key={idx} style={{ display:"flex", alignItems:"center", gap:8, background:BRAND.paper, borderRadius:8, padding:"8px 10px" }}>
               <div style={{ flex:1 }}>
                 <select value={r.fromId} onChange={e=>setRow(idx,"fromId",e.target.value)} disabled={auto} className="w-full rounded-md px-2 py-1.5" style={{ border:`1px solid ${BRAND.line}`, background: auto ? "#f4f1ea" : "#fff", fontSize:13 }}>
                   <option value="">Who moves…</option>
-                  {moverOptions.map(b=><option key={b.id} value={b.id}>{(b.name||"(no name)")} — {b.room}</option>)}
+                  {moverChoices.map(b=><option key={b.id} value={b.id}>{(b.name||"(no name)")} — {b.room}</option>)}
                 </select>
               </div>
               <span style={{ color:BRAND.inkSoft, fontSize:16 }}>→</span>
