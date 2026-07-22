@@ -1,4 +1,20 @@
 import { useState, useEffect, useMemo, useRef, Component } from "react";
+import * as Sentry from "@sentry/react";
+
+// --- Error monitoring (Sentry). Only turns on if a DSN is configured in the host (Vercel env). ---
+const SENTRY_DSN = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_SENTRY_DSN) || "";
+if (SENTRY_DSN) {
+  try {
+    Sentry.init({
+      dsn: SENTRY_DSN,
+      environment: (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.MODE) || "production",
+      tracesSampleRate: 0.1,
+      // Don't send errors while developing locally.
+      beforeSend: (event) => (location.hostname === "localhost" ? null : event),
+    });
+  } catch (e) { /* monitoring must never break the app */ }
+}
+
 import {
   Plus, Pencil, Trash2, X, Search, ChevronRight, ChevronLeft, MapPin, Save, Upload,
   LayoutDashboard, Package,
@@ -1978,6 +1994,7 @@ const supportMailto = (kind, detail) => {
 class ErrorBoundary extends Component {
   constructor(p) { super(p); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { try { if (SENTRY_DSN) Sentry.captureException(error, { extra: info }); } catch {} }
   render() {
     if (!this.state.error) return this.props.children;
     const detail = String(this.state.error && (this.state.error.message || this.state.error)).slice(0, 300);
