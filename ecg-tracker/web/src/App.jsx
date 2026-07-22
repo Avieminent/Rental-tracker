@@ -1992,9 +1992,36 @@ const supportMailto = (kind, detail) => {
 
 
 class ErrorBoundary extends Component {
-  constructor(p) { super(p); this.state = { error: null }; }
+  constructor(p) { super(p); this.state = { error: null, copied: false }; }
   static getDerivedStateFromError(error) { return { error }; }
   componentDidCatch(error, info) { try { if (SENTRY_DSN) Sentry.captureException(error, { extra: info }); } catch {} }
+  copyReport(detail) {
+    const user = (() => { try { return JSON.parse(localStorage.getItem("ecg_user") || "null")?.email || ""; } catch { return ""; } })();
+    const text = [
+      "To: " + SUPPORT_EMAIL,
+      "Subject: Eminent Central",
+      "",
+      "Something went wrong on Eminent Central. (Please attach a screenshot.)",
+      "",
+      "Page: " + (typeof location !== "undefined" ? location.href : ""),
+      "User: " + user,
+      "Time: " + new Date().toLocaleString(),
+      "Details: " + detail,
+    ].join("\n");
+    const done = () => { this.setState({ copied: true }); setTimeout(() => this.setState({ copied: false }), 2500); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, () => this.fallbackCopy(text, done)); }
+      else this.fallbackCopy(text, done);
+    } catch { this.fallbackCopy(text, done); }
+  }
+  fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta); done();
+    } catch {}
+  }
   render() {
     if (!this.state.error) return this.props.children;
     const detail = String(this.state.error && (this.state.error.message || this.state.error)).slice(0, 300);
@@ -2006,17 +2033,22 @@ class ErrorBoundary extends Component {
           <div style={{ fontSize: 14, color: BRAND.inkSoft, marginBottom: 16, lineHeight: 1.6 }}>
             A gremlin got into the wiring and this page fell over. Hit <b>Reload</b> to dust it off and carry on. If the gremlin keeps at it, tell us and we'll go gremlin-hunting.
           </div>
-          <div className="flex justify-center gap-2 flex-wrap" style={{ marginBottom: 18 }}>
+          <div className="flex justify-center gap-2 flex-wrap" style={{ marginBottom: this.state.copied ? 16 : 0 }}>
             <button onClick={() => location.reload()} className="text-sm rounded-md px-4 py-2 text-white" style={{ background: BRAND.ink }}>Reload the page</button>
-            <a href={supportMailto("App error", detail)} className="text-sm rounded-md px-4 py-2" style={{ border: `1px solid ${BRAND.line}` }}>Report the gremlin</a>
+            <button onClick={() => this.copyReport(detail)} className="text-sm rounded-md px-4 py-2 inline-flex items-center gap-1.5" style={{ border: `1px solid ${this.state.copied ? TONE.ok.dot : BRAND.line}`, color: this.state.copied ? TONE.ok.fg : BRAND.ink, background: this.state.copied ? TONE.ok.bg : "transparent" }}>{this.state.copied ? "✓ Error copied" : "Copy error to report it"}</button>
           </div>
-          <div className="rounded-lg px-3 py-3" style={{ background: BRAND.paper, border: `1px solid ${BRAND.line}`, textAlign: "left" }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: BRAND.inkSoft, marginBottom: 4 }}>If the button doesn't open your email, send one yourself:</div>
-            <div style={{ fontSize: 13 }}>To: <b style={{ userSelect: "all" }}>{SUPPORT_EMAIL}</b></div>
-            <div style={{ fontSize: 13 }}>Subject: <b style={{ userSelect: "all" }}>Eminent Central</b></div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>Please attach a screenshot and paste this bit:</div>
-            <div style={{ fontSize: 11, color: BRAND.inkSoft, marginTop: 4, fontFamily: "ui-monospace, monospace", userSelect: "all", wordBreak: "break-word" }}>{detail}</div>
-          </div>
+          {this.state.copied && (
+            <div className="rounded-xl px-4 py-4 text-left" style={{ background: TONE.ok.bg, border: `1px solid ${TONE.ok.dot}` }}>
+              <div style={{ fontSize: 13, color: TONE.ok.fg, fontWeight: 600, marginBottom: 8 }}>Copied! Last step — send it to us:</div>
+              <ol style={{ fontSize: 13, color: BRAND.ink, lineHeight: 1.7, paddingLeft: 18, margin: 0 }}>
+                <li>Open <b>Outlook</b> and start a new email.</li>
+                <li>Send it to <b style={{ userSelect: "all" }}>{SUPPORT_EMAIL}</b></li>
+                <li>Subject: <b style={{ userSelect: "all" }}>Eminent Central</b></li>
+                <li><b>Paste</b> (Ctrl+V) into the email — the details are already copied.</li>
+                <li>Send it.</li>
+              </ol>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -2953,7 +2985,7 @@ function UserManager({ facilities, meId, onClose }) {
             <button onClick={() => set("password", genPw())} className="shrink-0 px-3 rounded-lg text-xs" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.inkSoft }}>New</button></div></label>
         {err && <div className="text-xs mb-2" style={{ color: TONE.bad.fg }}>{err}</div>}
         <div className="flex justify-end"><button disabled={busy} onClick={add} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm text-white" style={{ background: BRAND.ink, opacity: busy ? 0.6 : 1 }}><Plus size={15} /> Create login</button></div>
-        {created && <div className="mt-3 rounded-lg px-4 py-3 text-sm" style={{ background: TONE.good.bg, color: TONE.good.fg }}>Share once, then have them change it: <b>{created.email}</b> · password <span className="font-mono">{created.password}</span> <button onClick={() => setCreated(null)} className="underline ml-2">dismiss</button></div>}
+        {created && <div className="mt-3 rounded-lg px-4 py-3 text-sm" style={{ background: TONE.ok.bg, color: TONE.ok.fg }}>Share once, then have them change it: <b>{created.email}</b> · password <span className="font-mono">{created.password}</span> <button onClick={() => setCreated(null)} className="underline ml-2">dismiss</button></div>}
       </div>
       <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${BRAND.line}` }}>
         {users === null ? <div className="px-4 py-5 text-sm" style={{ color: BRAND.inkSoft }}>Loading…</div>
