@@ -156,7 +156,6 @@ function seed() {
   });
   // Minimal sample rows so a page isn't blank — placeholder data only.
   const cc = fid("Champion City");
-  modules.census[cc] = { daily: [{ id: uid(), date: todayISO(), beds: 187, census: 150, medA: 28, managed: 22, medicaid: 88, private: 12, admits: 3, discharges: 1, comments: "" }] };
   modules.staffing[cc] = { open: [{ id: uid(), dept: "Nursing", title: "RN - Night", ftpt: "FT", opened: "2026-05-01", status: "Open", priority: "Critical", candidate: "" }], licenses: [{ id: uid(), employee: "SAMPLE Employee", role: "RN", credential: "RN", licNo: "PA-000000", expiration: "2026-07-15", comments: "" }], turnover: [] };
 
   return { rentals, modules };
