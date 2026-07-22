@@ -111,6 +111,7 @@ const onErr = () => alert("Couldn’t reach the server — that change may not h
 function recordsToData(records) {
   const data = { rentals: {}, modules: {}, budget: {} };
   records.forEach((r) => {
+    if (r.module === "census") return; // bedboard is managed by bedboardStore
     const row = { id: r.id, ...r.data };
     if (r.module === "rentals") (data.rentals[r.facility_id] ||= []).push(row);
     else if (r.module === "budget") (data.budget[r.facility_id] ||= []).push(row);
@@ -573,14 +574,48 @@ const nowHM = () => new Date().toTimeString().slice(0,5);
 /* Shared in-session store: the bedboard writes here, other pages read here.
    Still browser-only — everything resets on refresh. */
 const bedboardStore = {
-  data: {},
-  history: {},
+  data: {},          // facilityName -> resident array
+  history: {},       // facilityName -> { dateISO: snapshot }
+  recordId: {},      // facilityName -> Neon record id for module 'census'
+  facilityId: {},    // facilityName -> facility uuid
+  saveTimer: {},     // facilityName -> debounce timer
   listeners: new Set(),
-  get(fac) { if (!this.data[fac]) this.data[fac] = seedResidents(fac); return this.data[fac]; },
+  // Load saved boards from the bootstrap records (called once at startup).
+  hydrate(records, facilities) {
+    (facilities || []).forEach((f) => { this.facilityId[f.name] = f.id; });
+    (records || []).forEach((r) => {
+      if (r.module !== "census" || r.collection !== "board") return;
+      const f = (facilities || []).find((x) => x.id === r.facility_id);
+      if (!f) return;
+      this.recordId[f.name] = r.id;
+      this.data[f.name] = Array.isArray(r.data?.residents) ? r.data.residents : [];
+      this.history[f.name] = r.data?.history || {};
+    });
+    this.listeners.forEach((l) => l());
+  },
+  get(fac) { if (!this.data[fac]) this.data[fac] = emptyBoard(fac); return this.data[fac]; },
   set(fac, updater) {
     this.data[fac] = typeof updater === "function" ? updater(this.get(fac)) : updater;
     (this.history[fac] = this.history[fac] || {})[todayISO()] = this.data[fac];
     this.listeners.forEach((l) => l());
+    this.persist(fac);
+  },
+  // Debounced save of one facility's board to Neon.
+  persist(fac) {
+    clearTimeout(this.saveTimer[fac]);
+    this.saveTimer[fac] = setTimeout(async () => {
+      const fid = this.facilityId[fac];
+      if (!fid) return; // facility id unknown (e.g. before hydrate) — skip
+      const payload = { type: "board", residents: this.data[fac] || [], history: this.history[fac] || {} };
+      try {
+        if (this.recordId[fac]) {
+          await updateRecord(this.recordId[fac], payload);
+        } else {
+          const id = await createRecord("census", "board", fid, payload);
+          this.recordId[fac] = id;
+        }
+      } catch { onErr(); }
+    }, 800);
   },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
@@ -597,12 +632,12 @@ function useBedboardAll() {
   return all;
 }
 
-function seedResidents(fac){
+function emptyBoard(fac){
+  // Room layout only — no resident names. Staff fill these in; saved to the database.
   const rs = [];
   (BEDBOARD_LAYOUT[fac]||[]).forEach(w => w.beds.forEach(b => {
-    rs.push({ id: uid(), wing: w.wing, room: b.room, name: b.name || "",
-      status: b.name ? "Active" : "Available", mf:"", vent:false, payer:"",
-      // event detail captured on status change (date required now, rest later)
+    rs.push({ id: uid(), wing: w.wing, room: b.room, name: "",
+      status: "Available", mf:"", vent:false, payer:"",
       hosp:{}, disc:{}, death:{} });
   }));
   return rs;
@@ -2045,6 +2080,7 @@ function Shell({ auth, onLogout }) {
       try {
         const b = await api("/api/bootstrap");
         applyFacilities(b.facilities);
+        bedboardStore.hydrate(b.records, b.facilities);
         setData(recordsToData(b.records));
         if (!canSeeAll && b.facilities[0]) setView(b.facilities[0].id);
       } catch { setBootErr(true); }
