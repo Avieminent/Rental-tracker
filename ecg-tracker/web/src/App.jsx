@@ -663,7 +663,7 @@ function BedboardModule({ facility: fac, canImport }){
   const [res, setRes] = useBedboard(facility);
   const [adding, setAdding] = useState(false);
   const [modal, setModal] = useState(null); // {id, status}
-  const [moveFor, setMoveFor] = useState(null); // resident id being moved to another room
+  const [shuffleFor, setShuffleFor] = useState(null); // resident id whose status was set to Room Move
   const [exportDate, setExportDate] = useState(todayISO());
   const [exportFrom, setExportFrom] = useState(todayISO().slice(0, 8) + "01");
   const [pendingImport, setPendingImport] = useState(null);
@@ -681,23 +681,31 @@ function BedboardModule({ facility: fac, canImport }){
     }));
   };
   const setStatus = (id, status) => {
-    if (status === "Room Move") { setMoveFor(id); return; }
+    if (status === "Room Move") { setShuffleFor(id); return; }
     if (HOSP.includes(status) || TERMINAL.includes(status)) { setModal({ id, status }); return; }
     applyStatus(id, status);
   };
-  // Move a resident's details into an empty destination bed, and clear the bed they left.
-  const doMove = (fromId, toId) => {
+  // Apply a whole shuffle at once. moves = [{ fromId, toId }] where fromId is the
+  // resident being moved and toId is the destination BED (row) they move into.
+  const applyShuffle = (moves) => {
     setRes(rs => {
-      const from = rs.find(r => r.id === fromId);
-      if (!from) return rs;
+      const byId = Object.fromEntries(rs.map(r => [r.id, r]));
+      // snapshot the "person" payload for each mover before we overwrite anything
+      const carry = (r) => ({ name:r.name, mf:r.mf, vent:r.vent, payer:r.payer, status:"Active", admit:r.admit||todayISO(), spend:r.spend||[], trust:r.trust, trustHistory:r.trustHistory, hosp:r.hosp||{}, disc:{}, death:{} });
+      const payloads = {}; moves.forEach(m => { if (byId[m.fromId]) payloads[m.toId] = carry(byId[m.fromId]); });
+      const movedFromBeds = new Set(moves.map(m => m.fromId));
+      const landedBeds = new Set(moves.map(m => m.toId));
       return rs.map(r => {
-        if (r.id === toId) return { ...r, name: from.name, mf: from.mf, vent: from.vent, payer: from.payer, status: "Active", admit: from.admit || todayISO(), spend: from.spend || [], trust: from.trust, trustHistory: from.trustHistory, hosp: from.hosp || {}, disc: {}, death: {} };
-        if (r.id === fromId) return { ...r, name: "", mf: "", vent: false, payer: "", status: "Available", spend: [], trust: undefined, trustHistory: undefined, hosp: {}, disc: {}, death: {} };
+        if (payloads[r.id]) return { ...r, ...payloads[r.id] };         // someone moved INTO this bed
+        if (movedFromBeds.has(r.id) && !landedBeds.has(r.id))            // this bed's person left and nobody took it
+          return { ...r, name:"", mf:"", vent:false, payer:"", status:"Available", spend:[], trust:undefined, trustHistory:undefined, hosp:{}, disc:{}, death:{} };
         return r;
       });
     });
-    setMoveFor(null);
+    setShuffleFor(null);
   };
+
+  // Move a resident's details into an empty destination bed, and clear the bed they left.
 
   const exportBoard = () => {
     const from = exportFrom <= exportDate ? exportFrom : exportDate;
@@ -932,11 +940,11 @@ function BedboardModule({ facility: fac, canImport }){
       {modal && <EventModal spec={modal} resident={res.find(r=>r.id===modal.id)}
         onCancel={()=>setModal(null)}
         onConfirm={(detail)=>{ applyStatus(modal.id, modal.status, detail); setModal(null); }} />}
-      {moveFor && <MoveModal
-        resident={res.find(r=>r.id===moveFor)}
-        openBeds={res.filter(r=>!holdsBed(r) && r.id!==moveFor).map(r=>({ id:r.id, wing:r.wing, room:r.room }))}
-        onCancel={()=>setMoveFor(null)}
-        onMove={(toId)=>doMove(moveFor, toId)} />}
+      {shuffleFor && <ShuffleModal
+        seedId={shuffleFor}
+        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, occupied:holdsBed(r) }))}
+        onCancel={()=>setShuffleFor(null)}
+        onApply={applyShuffle} />}
       {pendingImport && (
         <Overlay>
           <div style={{ fontFamily: BB_SERIF, fontSize: 18, marginBottom: 8 }}>Confirm census import</div>
@@ -1118,24 +1126,88 @@ function AddModal({ openBeds, onAdd, onCancel }){
   );
 }
 
-function MoveModal({ resident, openBeds, onCancel, onMove }){
-  const [toId,setToId]=useState(openBeds[0]?.id || "");
-  const none = openBeds.length === 0;
+function ShuffleModal({ seedId, beds, onCancel, onApply }){
+  // Each row: { fromId (resident/bed being moved), toId (destination bed) }.
+  // Rule: choosing an OCCUPIED destination auto-adds a row for the bumped resident.
+  const bed = (id) => beds.find(b => b.id === id);
+  const occupiedBeds = beds.filter(b => b.occupied);
+  const [rows, setRows] = useState([{ fromId: seedId || occupiedBeds[0]?.id || "", toId: "" }]);
+
+  // Which beds are already used as a destination (so we don't send two people to one room)
+  const usedDest = (exceptIdx) => new Set(rows.filter((_, i) => i !== exceptIdx).map(r => r.toId).filter(Boolean));
+
+  const setRow = (idx, key, val) => {
+    setRows(prev => {
+      let next = prev.map((r, i) => i === idx ? { ...r, [key]: val } : r);
+      // If a destination is an occupied bed whose resident isn't already being moved, auto-add a row for them.
+      if (key === "toId" && val) {
+        const dest = bed(val);
+        const alreadyMoving = next.some(r => r.fromId === val);
+        if (dest && dest.occupied && !alreadyMoving) {
+          next = [...next, { fromId: val, toId: "" }];
+        }
+      }
+      return next;
+    });
+  };
+  const removeRow = (idx) => setRows(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx));
+  const addRow = () => setRows(prev => [...prev, { fromId: "", toId: "" }]);
+
+  // Validation: every row needs both fields; no two rows share a destination; a person can't move to their own bed.
+  const problems = [];
+  const dests = rows.map(r => r.toId).filter(Boolean);
+  if (new Set(dests).size !== dests.length) problems.push("Two moves point to the same room.");
+  rows.forEach((r, i) => { if (r.fromId && r.toId && r.fromId === r.toId) problems.push("A resident can't move to their own bed."); });
+  const incomplete = rows.some(r => !r.fromId || !r.toId);
+  // Every bumped resident (occupied bed used as a destination) must themselves be a mover.
+  rows.forEach(r => {
+    if (r.toId) { const d = bed(r.toId); if (d && d.occupied && !rows.some(x => x.fromId === r.toId)) problems.push(`${d.name || d.room} was bumped and still needs a room.`); }
+  });
+  const ok = !incomplete && problems.length === 0;
+
+  const moverOptions = beds.filter(b => b.occupied);
   return (
     <Overlay>
-      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:6 }}>Move resident</div>
-      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>
-        Moving <b style={{ color:BRAND.ink }}>{resident?.name || "(no name)"}</b> from room <b style={{ color:BRAND.ink }}>{resident?.room}</b> to another open bed. Their details go with them and the old bed is freed.
+      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:6 }}>Move / shuffle residents</div>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>Plan each move: who's moving and to which room. Sending someone into an occupied room automatically adds a line for the resident who was there — everyone bumped needs a room before you can apply.</div>
+      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        {rows.map((r, idx) => {
+          const used = usedDest(idx);
+          const destOptions = beds.filter(b => b.id === r.toId || !used.has(b.id));
+          const auto = idx > 0 && rows.slice(0, idx).some(x => x.toId === r.fromId); // this row was auto-created by a bump
+          return (
+            <div key={idx} style={{ display:"flex", alignItems:"center", gap:8, background:BRAND.paper, borderRadius:8, padding:"8px 10px" }}>
+              <div style={{ flex:1 }}>
+                <select value={r.fromId} onChange={e=>setRow(idx,"fromId",e.target.value)} disabled={auto} className="w-full rounded-md px-2 py-1.5" style={{ border:`1px solid ${BRAND.line}`, background: auto ? "#f4f1ea" : "#fff", fontSize:13 }}>
+                  <option value="">Who moves…</option>
+                  {moverOptions.map(b=><option key={b.id} value={b.id}>{(b.name||"(no name)")} — {b.room}</option>)}
+                </select>
+              </div>
+              <span style={{ color:BRAND.inkSoft, fontSize:16 }}>→</span>
+              <div style={{ flex:1 }}>
+                <select value={r.toId} onChange={e=>setRow(idx,"toId",e.target.value)} className="w-full rounded-md px-2 py-1.5" style={{ border:`1px solid ${BRAND.line}`, fontSize:13 }}>
+                  <option value="">To which room…</option>
+                  {destOptions.map(b=><option key={b.id} value={b.id}>{b.room} — {b.wing}{b.occupied ? ` (occupied: ${b.name||"—"})` : " (empty)"}</option>)}
+                </select>
+              </div>
+              <button onClick={()=>removeRow(idx)} disabled={rows.length===1||auto} title={auto?"Auto-added — remove the move that bumped them":"Remove this move"} style={{ border:"none", background:"none", color: (rows.length===1||auto)?"#ccc":BRAND.inkSoft, cursor:(rows.length===1||auto)?"default":"pointer", fontSize:16, padding:"0 4px" }}>✕</button>
+            </div>
+          );
+        })}
       </div>
-      {none ? (
-        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>There are no open beds to move them into. Free a bed first.</div>
-      ) : (
-        <L label="Move to"><select value={toId} onChange={e=>setToId(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{openBeds.map(b=><option key={b.id} value={b.id}>{b.room} — {b.wing}</option>)}</select></L>
+      <div style={{ marginTop:10 }}>
+        <button onClick={addRow} className="text-xs rounded-md px-2.5 py-1.5" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", color:BRAND.ink }}>+ Add another move</button>
+      </div>
+      {problems.length > 0 && (
+        <div style={{ marginTop:12, fontSize:12, color:TONE.bad.fg, background:TONE.bad.bg, borderRadius:8, padding:"8px 10px" }}>
+          {[...new Set(problems)].map((p,i)=><div key={i}>• {p}</div>)}
+        </div>
       )}
-      <div style={{height:16}} />
+      <div style={{ marginTop:12, fontSize:12, color:BRAND.inkSoft }}>{rows.filter(r=>r.fromId&&r.toId).length} move(s) planned</div>
+      <div style={{height:14}} />
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-        <button disabled={none || !toId} onClick={()=>onMove(toId)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!none && toId)?BRAND.ink:"#aaa" }}>Move resident</button>
+        <button disabled={!ok} onClick={()=>onApply(rows.filter(r=>r.fromId&&r.toId).map(r=>({ fromId:r.fromId, toId:r.toId })))} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: ok?BRAND.ink:"#aaa" }}>Apply moves</button>
       </div>
     </Overlay>
   );
