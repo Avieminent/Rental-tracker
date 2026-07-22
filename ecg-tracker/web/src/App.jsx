@@ -663,6 +663,7 @@ function BedboardModule({ facility: fac, canImport }){
   const [res, setRes] = useBedboard(facility);
   const [adding, setAdding] = useState(false);
   const [modal, setModal] = useState(null); // {id, status}
+  const [moveFor, setMoveFor] = useState(null); // resident id being moved to another room
   const [exportDate, setExportDate] = useState(todayISO());
   const [exportFrom, setExportFrom] = useState(todayISO().slice(0, 8) + "01");
   const [pendingImport, setPendingImport] = useState(null);
@@ -680,8 +681,22 @@ function BedboardModule({ facility: fac, canImport }){
     }));
   };
   const setStatus = (id, status) => {
+    if (status === "Room Move") { setMoveFor(id); return; }
     if (HOSP.includes(status) || TERMINAL.includes(status)) { setModal({ id, status }); return; }
     applyStatus(id, status);
+  };
+  // Move a resident's details into an empty destination bed, and clear the bed they left.
+  const doMove = (fromId, toId) => {
+    setRes(rs => {
+      const from = rs.find(r => r.id === fromId);
+      if (!from) return rs;
+      return rs.map(r => {
+        if (r.id === toId) return { ...r, name: from.name, mf: from.mf, vent: from.vent, payer: from.payer, status: "Active", admit: from.admit || todayISO(), spend: from.spend || [], trust: from.trust, trustHistory: from.trustHistory, hosp: from.hosp || {}, disc: {}, death: {} };
+        if (r.id === fromId) return { ...r, name: "", mf: "", vent: false, payer: "", status: "Available", spend: [], trust: undefined, trustHistory: undefined, hosp: {}, disc: {}, death: {} };
+        return r;
+      });
+    });
+    setMoveFor(null);
   };
 
   const exportBoard = () => {
@@ -917,6 +932,11 @@ function BedboardModule({ facility: fac, canImport }){
       {modal && <EventModal spec={modal} resident={res.find(r=>r.id===modal.id)}
         onCancel={()=>setModal(null)}
         onConfirm={(detail)=>{ applyStatus(modal.id, modal.status, detail); setModal(null); }} />}
+      {moveFor && <MoveModal
+        resident={res.find(r=>r.id===moveFor)}
+        openBeds={res.filter(r=>!holdsBed(r) && r.id!==moveFor).map(r=>({ id:r.id, wing:r.wing, room:r.room }))}
+        onCancel={()=>setMoveFor(null)}
+        onMove={(toId)=>doMove(moveFor, toId)} />}
       {pendingImport && (
         <Overlay>
           <div style={{ fontFamily: BB_SERIF, fontSize: 18, marginBottom: 8 }}>Confirm census import</div>
@@ -927,8 +947,8 @@ function BedboardModule({ facility: fac, canImport }){
           </div>
         </Overlay>
       )}
-      {adding && <AddModal wings={(BEDBOARD_LAYOUT[facility]||[]).map(w=>w.wing)} onCancel={()=>setAdding(false)}
-        onAdd={(d)=>{ setRes(rs=>[...rs,{ id:uid(), ...d, status:"Active", vent:false, admit: todayISO(), spend: [], hosp:{}, disc:{}, death:{} }]); setAdding(false); }} />}
+      {adding && <AddModal openBeds={res.filter(r=>!holdsBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} onCancel={()=>setAdding(false)}
+        onAdd={(d)=>{ setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer, status:"Active", admit: todayISO(), hosp:{}, disc:{}, death:{} } : r )); setAdding(false); }} />}
     </div>
   );
 }
@@ -1065,23 +1085,57 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
   );
 }
 
-function AddModal({ wings, onAdd, onCancel }){
-  const [f,setF]=useState({ name:"", wing:wings[0], room:"", payer:"", mf:"" });
+function AddModal({ openBeds, onAdd, onCancel }){
+  // openBeds: [{ id, wing, room }] — beds with no current resident. Adding fills one of these.
+  const [f,setF]=useState({ bedId: openBeds[0]?.id || "", name:"", payer:"", mf:"", vent:false });
   const set=(k,v)=>setF(s=>({...s,[k]:v}));
+  const noBeds = openBeds.length === 0;
   return (
     <Overlay>
       <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:12 }}>Add resident</div>
-      <L label="Name"><input value={f.name} onChange={e=>set("name",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
-      <div style={{height:12}} />
-      <L label="Room / bed"><input value={f.room} onChange={e=>set("room",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
-      <div style={{height:12}} />
-      <L label="Wing"><select value={f.wing} onChange={e=>set("wing",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{wings.map(w=><option key={w}>{w}</option>)}</select></L>
-      <div style={{height:12}} />
-      <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+      {noBeds ? (
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>Every bed in this facility is currently occupied. Free a bed (discharge, or mark Available) before adding a resident.</div>
+      ) : (
+        <>
+          <L label="Room / bed"><select value={f.bedId} onChange={e=>set("bedId",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{openBeds.map(b=><option key={b.id} value={b.id}>{b.room} — {b.wing}</option>)}</select></L>
+          <div style={{height:12}} />
+          <L label="Name"><input value={f.name} onChange={e=>set("name",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
+          <div style={{height:12}} />
+          <div style={{ display:"flex", gap:12 }}>
+            <div style={{ flex:1 }}><L label="M/F"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
+            <div style={{ flex:1 }}><L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L></div>
+          </div>
+          <div style={{height:12}} />
+          <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+          <div style={{height:16}} />
+        </>
+      )}
+      <div className="flex justify-end gap-2">
+        <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+        <button disabled={noBeds || !f.name || !f.bedId} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!noBeds && f.name && f.bedId)?BRAND.ink:"#aaa" }}>Add</button>
+      </div>
+    </Overlay>
+  );
+}
+
+function MoveModal({ resident, openBeds, onCancel, onMove }){
+  const [toId,setToId]=useState(openBeds[0]?.id || "");
+  const none = openBeds.length === 0;
+  return (
+    <Overlay>
+      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:6 }}>Move resident</div>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>
+        Moving <b style={{ color:BRAND.ink }}>{resident?.name || "(no name)"}</b> from room <b style={{ color:BRAND.ink }}>{resident?.room}</b> to another open bed. Their details go with them and the old bed is freed.
+      </div>
+      {none ? (
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>There are no open beds to move them into. Free a bed first.</div>
+      ) : (
+        <L label="Move to"><select value={toId} onChange={e=>setToId(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{openBeds.map(b=><option key={b.id} value={b.id}>{b.room} — {b.wing}</option>)}</select></L>
+      )}
       <div style={{height:16}} />
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-        <button disabled={!f.name} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:f.name?BRAND.ink:"#aaa" }}>Add</button>
+        <button disabled={none || !toId} onClick={()=>onMove(toId)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!none && toId)?BRAND.ink:"#aaa" }}>Move resident</button>
       </div>
     </Overlay>
   );
