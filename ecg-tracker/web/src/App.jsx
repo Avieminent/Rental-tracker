@@ -16,10 +16,7 @@ if (SENTRY_DSN) {
 }
 
 import {
-  Plus, Pencil, Trash2, X, Search, ChevronRight, ChevronLeft, MapPin, Save, Upload,
-  LayoutDashboard, Package,
-  CheckCircle2, AlertTriangle, Clock, CalendarHeart, User, ArrowLeft,
-  Users, Activity, DollarSign, Building2, Briefcase, Star, Wallet, History, KeyRound, Landmark,
+  Plus, Pencil, Trash2, X, Search, ChevronRight, Save, Upload, LayoutDashboard, Package, CheckCircle2, AlertTriangle, User, Users, Activity, Building2, Briefcase, Wallet, History, KeyRound, Landmark
 } from "lucide-react";
 
 /* ============================ Brand ============================ */
@@ -137,42 +134,8 @@ function recordsToData(records) {
 }
 const fid = (name) => FACILITIES.find((f) => f.name === name).id;
 const RI = (o) => ({ id: uid(), vendor: "", comments: "", ...o });
-function seed() {
-  const rentals = {};
-  FACILITIES.forEach((f) => (rentals[f.id] = []));
-  // Sample rows use obvious placeholder names only — never real residents (PHI).
-  rentals[fid("Champion City")] = [
-    RI({ resident: "SAMPLE Resident 1", room: "101-A", status: "Renting", equipment: '36" air mattress', category: "Mattress/Bed", startDate: "2026-04-16", daily: 6, monthly: 180, purchase: 335, comments: "Sample entry" }),
-    RI({ resident: "SAMPLE Resident 2", room: "102-A", status: "On order", equipment: "Scoop Mattress", category: "Mattress/Bed", startDate: "2026-03-12", daily: 9, monthly: 270, purchase: 216 }),
-  ];
-  const residents = [];
-  const modules = { roster: {}, census: {}, rehosp: {}, ar: {}, staffing: {} };
-  FACILITIES.forEach((f) => {
-    const m = FACILITY_META[f.name] || {};
-    const staff = [];
-    if (m.nha && !/OPEN|Vacant/i.test(m.nha)) staff.push({ id: uid(), dept: "Administration", name: m.nha, title: "Administrator (NHA)", phone: "", email: "" });
-    if (m.don && !/OPEN|—/.test(m.don)) staff.push({ id: uid(), dept: "Nursing", name: m.don, title: "Director of Nursing", phone: "", email: "" });
-    modules.roster[f.id] = { staff };
-  });
-  // Minimal sample rows so a page isn't blank — placeholder data only.
-  const cc = fid("Champion City");
-  modules.staffing[cc] = { open: [{ id: uid(), dept: "Nursing", title: "RN - Night", ftpt: "FT", opened: "2026-05-01", status: "Open", priority: "Critical", candidate: "" }], licenses: [{ id: uid(), employee: "SAMPLE Employee", role: "RN", credential: "RN", licNo: "PA-000000", expiration: "2026-07-15", comments: "" }], turnover: [] };
-
-  return { rentals, modules };
-}
 
 /* ============================ Storage ============================ */
-function useStore() {
-  const [data, setData] = useState(null);
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => { (async () => {
-    try { const r = await window.storage?.get(STORAGE_KEY, true); setData(r?.value ? JSON.parse(r.value) : seed()); }
-    catch { setData(seed()); } finally { setLoaded(true); }
-  })(); }, []);
-  useEffect(() => { if (!loaded || !data) return; (async () => { try { await window.storage?.set(STORAGE_KEY, JSON.stringify(data), true); } catch {} })(); }, [data, loaded]);
-  const update = (fn) => setData((d) => { const n = structuredClone(d); fn(n); return n; });
-  return { data, loaded, update };
-}
 
 /* ============================ App shell ============================ */
 /* ============================ Config-driven trackers ============================ */
@@ -632,6 +595,20 @@ const bedboardStore = {
       } catch { onErr(); }
     }, 800);
   },
+  // Correct one resident's field across a date range of snapshots (and the live board if the range reaches today).
+  // matchId is the resident's id; field is one of name/mf/vent/payer/status; value is the new value.
+  // Backfill a resident into a past date and every day forward (incl. today + live board).
+  // bedId identifies the empty bed to fill; fromISO is the day they should first appear.
+  backfillResident(fac, bedId, fields, fromISO) {
+    const apply = (arr) => arr.map(r => r.id === bedId
+      ? { ...r, name:fields.name, mf:fields.mf, vent:fields.vent, payer:fields.payer, status:"Active", admit: fromISO }
+      : r);
+    const hist = this.history[fac] || (this.history[fac] = {});
+    Object.keys(hist).forEach(day => { if (day >= fromISO && Array.isArray(hist[day])) hist[day] = apply(hist[day]); });
+    if (this.data[fac]) this.data[fac] = apply(this.data[fac]);
+    this.listeners.forEach((l) => l());
+    this.persist(fac);
+  },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
 function useBedboard(fac) {
@@ -661,11 +638,14 @@ function emptyBoard(fac){
 function BedboardModule({ facility: fac, canImport }){
   const facility = fac.name;
   const [res, setRes] = useBedboard(facility);
+  const [viewDate, setViewDate] = useState(null); // null = live/today; else an ISO date to view historically
+  const viewing = !!viewDate && viewDate !== todayISO();
+  // What the grid shows: live res, or a past day's snapshot (read-only).
+  const displayRes = viewing ? (bedboardStore.history[facility]?.[viewDate] || []) : res;
   const [adding, setAdding] = useState(false);
   const [modal, setModal] = useState(null); // {id, status}
   const [shuffleFor, setShuffleFor] = useState(null); // resident id whose status was set to Room Move
-  const [exportDate, setExportDate] = useState(todayISO());
-  const [exportFrom, setExportFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [editFor, setEditFor] = useState(null); // resident id being edited
   const [pendingImport, setPendingImport] = useState(null);
 
   const applyStatus = (id, status, detail) => {
@@ -711,19 +691,12 @@ function BedboardModule({ facility: fac, canImport }){
   // Move a resident's details into an empty destination bed, and clear the bed they left.
 
   const exportBoard = () => {
-    const from = exportFrom <= exportDate ? exportFrom : exportDate;
-    const to = exportFrom <= exportDate ? exportDate : exportFrom;
-    const hist = bedboardStore.history[facility] || {};
-    const days = [];
-    for (let d = new Date(from + "T00:00:00"); d <= new Date(to + "T00:00:00"); d.setDate(d.getDate() + 1)) {
-      const iso = d.toISOString().slice(0, 10);
-      const rows = iso === todayISO() ? res : hist[iso];
-      if (rows) days.push([iso, rows]);
-    }
-    if (!days.length) { toast(`No census history between ${from} and ${to} yet. Daily history starts building once the board is saved to the database — for now only today (${todayISO()}) is available.`); return; }
-    const out = [["Date", "Wing", "Room", "Name", "Payer", "M/F", "Vent", "Status", "Admit date"]];
-    days.forEach(([iso, rows]) => rows.forEach((r) => out.push([iso, r.wing, r.room, r.name || "", r.payer || "", r.mf || "", r.vent ? "Y" : "", r.status, r.admit || ""])));
-    downloadCSV(`Census_${facility.replace(/\s+/g, "_")}_${from}_to_${to}.csv`, out);
+    const iso = viewing ? viewDate : todayISO();
+    const rows = displayRes;
+    if (!rows || !rows.length) { toast(`No census data to export for ${iso}.`); return; }
+    const out = [["Date","Wing","Room","Name","Payer","M/F","Vent","Status","Admit date"]];
+    rows.forEach((r) => out.push([iso, r.wing, r.room, r.name || "", r.payer || "", r.mf || "", r.vent ? "Y" : "", r.status || "", r.admit || ""]));
+    downloadCSV(`Census_${facility.replace(/\s+/g, "_")}_${iso}.csv`, out);
   };
 
   const importCensusCSV = (file) => {
@@ -801,7 +774,7 @@ function BedboardModule({ facility: fac, canImport }){
 
   const counts = useMemo(() => {
     let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0;
-    res.forEach(r => {
+    displayRes.forEach(r => {
       if (holdsBed(r)) occ++;
       if (r.status==="Available") avail++;
       if (r.status==="Hospitalization") hosp++;
@@ -810,18 +783,18 @@ function BedboardModule({ facility: fac, canImport }){
       if (r.mf==="M" && IN_FACILITY.includes(r.status)) m++;
       if (r.mf==="F" && IN_FACILITY.includes(r.status)) fem++;
     });
-    return { total:res.length, occ, avail, hosp, bh, vent, m, fem, occPct: res.length ? Math.round(occ/res.length*100) : 0 };
+    return { total:displayRes.length, occ, avail, hosp, bh, vent, m, fem, occPct: displayRes.length ? Math.round(occ/res.length*100) : 0 };
   }, [res]);
 
   const wings = useMemo(() => {
     const m = {}; (BEDBOARD_LAYOUT[facility]||[]).forEach(w => m[w.wing] = []);
-    res.forEach(r => { (m[r.wing] = m[r.wing]||[]).push(r); });
+    displayRes.forEach(r => { (m[r.wing] = m[r.wing]||[]).push(r); });
     return Object.entries(m);
-  }, [res, facility]);
+  }, [displayRes, facility]);
 
-  const inHospital = res.filter(r => r.status==="Hospitalization");
-  const discharges = res.filter(r => r.status==="Discharged");
-  const deaths     = res.filter(r => r.status==="Deceased");
+  const inHospital = displayRes.filter(r => r.status==="Hospitalization");
+  const discharges = displayRes.filter(r => r.status==="Discharged");
+  const deaths     = displayRes.filter(r => r.status==="Deceased");
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
@@ -846,20 +819,25 @@ function BedboardModule({ facility: fac, canImport }){
             </div>
             <div style={{ color:BRAND.inkSoft, fontSize:13 }}>Daily bed board &amp; census · preview (changes reset on refresh)</div>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span style={{ fontSize:12, color:BRAND.inkSoft }}>Export</span>
-            <input type="date" value={exportFrom} max={todayISO()} onChange={(e)=>setExportFrom(e.target.value)} className="text-sm rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}` }} />
-            <span style={{ fontSize:12, color:BRAND.inkSoft }}>to</span>
-            <input type="date" value={exportDate} max={todayISO()} onChange={(e)=>setExportDate(e.target.value)} className="text-sm rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}` }} />
-            <button onClick={exportBoard} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Export</button>
-            <button onClick={()=>setAdding(true)} className="text-sm rounded-md px-3 py-1.5" style={{ background:BRAND.tan, color:"#fff" }}>+ Add resident</button>
-            {canImport && (
-              <label className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", cursor:"pointer", color:BRAND.inkSoft }} title="Replace this board from a CSV file (admin only)">
-                Import
-                <input type="file" accept=".csv,text/csv" style={{ display:"none" }}
-                  onChange={(e)=>{ const f=e.target.files[0]; e.target.value=""; if(f) importCensusCSV(f); }} />
-              </label>
-            )}
+          <div className="flex flex-col items-end gap-2">
+            {/* Top row — Export / Import, both same color */}
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <button onClick={exportBoard} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Export</button>
+              {canImport && (
+                <label className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink, cursor:"pointer" }} title="Replace this board from a CSV file (admin only)">
+                  Import
+                  <input type="file" accept=".csv,text/csv" style={{ display:"none" }}
+                    onChange={(e)=>{ const f=e.target.files[0]; e.target.value=""; if(f) importCensusCSV(f); }} />
+                </label>
+              )}
+            </div>
+            {/* Bottom row — Date then Add resident, pushed to the right */}
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {viewing && <button onClick={()=>setViewDate(null)} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", color:BRAND.ink }}>Back to today</button>}
+              <span style={{ fontSize:12, color:BRAND.inkSoft }}>Date</span>
+              <input type="date" value={viewDate || todayISO()} max={todayISO()} onChange={(e)=>setViewDate(e.target.value===todayISO()?null:e.target.value)} className="text-sm rounded-md px-2 py-1.5" style={{ background:BRAND.tan, color:"#fff", border:"none", colorScheme:"dark" }} />
+              <button onClick={()=>setAdding(true)} className="text-sm rounded-md px-3 py-1.5" style={{ background:BRAND.tan, color:"#fff" }}>{viewing ? "+ Add resident (backfill)" : "+ Add resident"}</button>
+            </div>
           </div>
         </div>
 
@@ -872,6 +850,17 @@ function BedboardModule({ facility: fac, canImport }){
           ))}
         </div>
 
+        {viewing && (
+          <div className="rounded-lg px-4 py-2.5 mb-4 flex items-center justify-between" style={{ background:"#f3ece1", border:`1px solid #d9c489`, color:BRAND.ink }}>
+            <span style={{ fontSize:13 }}>📅 Viewing the board as it was on <b>{viewDate}</b> — historical snapshot.</span>
+            <button onClick={()=>setViewDate(null)} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>Back to today</button>
+          </div>
+        )}
+        {viewing && displayRes.length===0 && (
+          <div className="rounded-lg px-4 py-6 mb-4 text-center" style={{ background:BRAND.paper, border:`1px solid ${BRAND.line}`, color:BRAND.inkSoft, fontSize:13 }}>
+            No saved snapshot for {viewDate}. Daily history builds automatically going forward each day the board is saved — so past dates before today may not have data yet.
+          </div>
+        )}
         <div className="grid gap-5" style={{ gridTemplateColumns:"1.5fr 1fr" }}>
           <div className="flex flex-col gap-4">
             {wings.map(([wing, list]) => {
@@ -897,14 +886,18 @@ function BedboardModule({ facility: fac, canImport }){
                       return (
                         <tr key={r.id} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background:st.tint }}>
                           <td className="px-2 py-1.5" style={{ borderLeft:`3px solid ${st.bar}` }}>{r.room}</td>
-                          <td className="px-2 py-1.5" style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{shown}</td>
+                          <td className="px-2 py-1.5" style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {holdsBed(r) && !viewing
+                              ? <button onClick={()=>setEditFor(r.id)} title="Edit resident details" style={{ background:"none", border:"none", padding:0, color:BRAND.ink, cursor:"pointer", textAlign:"left", maxWidth:"100%", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration:"underline", textDecorationColor:BRAND.line, textUnderlineOffset:"2px" }}>{shown}</button>
+                              : shown}
+                          </td>
                           <td className="px-2 py-1.5">
-                            <select value={r.mf} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,mf:e.target.value}:x))} style={{ fontSize:12, background:"transparent" }}>
+                            <select disabled={viewing} value={r.mf} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,mf:e.target.value}:x))} style={{ fontSize:12, fontWeight:600, borderRadius:6, padding:"1px 4px", border:"none", background: r.mf==="M" ? "#dbeafe" : r.mf==="F" ? "#fbe1ec" : "transparent", color: r.mf==="M" ? "#1e40af" : r.mf==="F" ? "#9d266b" : BRAND.ink }}>
                               <option value=""></option><option>M</option><option>F</option>
                             </select>
                           </td>
                           <td className="px-2 py-1.5 text-center">
-                            <input type="checkbox" checked={r.vent} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,vent:e.target.checked}:x))} />
+                            <input type="checkbox" disabled={viewing} checked={r.vent} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,vent:e.target.checked}:x))} />
                           </td>
                           <td className="px-1 py-1">
                             <select value={TERMINAL.includes(r.status)?r.status:r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}` }}>
@@ -921,8 +914,9 @@ function BedboardModule({ facility: fac, canImport }){
           </div>
 
           <div className="flex flex-col gap-3">
-            <Legend res={res} />
+            <Legend res={displayRes} />
             <CensusTiles counts={counts} />
+            <PayerChanges res={displayRes} facility={facility} />
             <ColorKey />
             <Section title="Activity report — today" cols={["Name","Time","Type","Room","Payer"]}
               rows={activity(res)} />
@@ -943,6 +937,15 @@ function BedboardModule({ facility: fac, canImport }){
       {modal && <EventModal spec={modal} resident={res.find(r=>r.id===modal.id)}
         onCancel={()=>setModal(null)}
         onConfirm={(detail)=>{ applyStatus(modal.id, modal.status, detail); setModal(null); }} />}
+      {editFor && <EditResidentModal
+        resident={res.find(r=>r.id===editFor)}
+        onCancel={()=>setEditFor(null)}
+        onSave={(d)=>{ setRes(rs=>rs.map(r=> {
+          if (r.id!==editFor) return r;
+          const next = { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer };
+          if (d._payerChanged) next.payerLog = [...(r.payerLog||[]), { date:d._effDate, from:d._prevPayer, to:d.payer }];
+          return next;
+        })); setEditFor(null); }} />}
       {shuffleFor && <ShuffleModal
         seedId={shuffleFor}
         beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, occupied:holdsBed(r) }))}
@@ -958,8 +961,19 @@ function BedboardModule({ facility: fac, canImport }){
           </div>
         </Overlay>
       )}
-      {adding && <AddModal openBeds={res.filter(r=>!holdsBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} onCancel={()=>setAdding(false)}
-        onAdd={(d)=>{ setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer, status:"Active", admit: todayISO(), hosp:{}, disc:{}, death:{} } : r )); setAdding(false); }} />}
+      {adding && <AddModal openBeds={(viewing?displayRes:res).filter(r=>!holdsBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} backfillDate={viewing?viewDate:null} onCancel={()=>setAdding(false)}
+        onAdd={(d)=>{
+          if (viewing) {
+            // Backfill: add to the viewed day and every day forward + live board.
+            bedboardStore.backfillResident(facility, d.bedId, { name:d.name, mf:d.mf, vent:d.vent, payer:d.payer }, viewDate);
+            // Log the payer as a change effective the backfill date, so it shows in today's Payer changes.
+            setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, payerLog:[...(r.payerLog||[]), { date:viewDate, from:"", to:d.payer }] } : r));
+            toast(`Backfilled ${d.name} from ${viewDate} forward.`);
+          } else {
+            setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer, status:"Active", admit: todayISO(), hosp:{}, disc:{}, death:{} } : r ));
+          }
+          setAdding(false);
+        }} />}
     </div>
   );
 }
@@ -1096,14 +1110,15 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
   );
 }
 
-function AddModal({ openBeds, onAdd, onCancel }){
+function AddModal({ openBeds, backfillDate, onAdd, onCancel }){
   // openBeds: [{ id, wing, room }] — beds with no current resident. Adding fills one of these.
   const [f,setF]=useState({ bedId: openBeds[0]?.id || "", name:"", payer:"", mf:"", vent:false });
   const set=(k,v)=>setF(s=>({...s,[k]:v}));
   const noBeds = openBeds.length === 0;
   return (
     <Overlay>
-      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:12 }}>Add resident</div>
+      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom: backfillDate?4:12 }}>{backfillDate ? "Add resident (backfill)" : "Add resident"}</div>
+      {backfillDate && <div style={{ fontSize:12, color:BRAND.inkSoft, marginBottom:12, background:"#f3ece1", border:`1px solid #d9c489`, borderRadius:6, padding:"6px 8px" }}>This resident will be added starting <b>{backfillDate}</b> and will appear on every day from then through today. Their payer will show in today's Payer changes.</div>}
       {noBeds ? (
         <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>Every bed in this facility is currently occupied. Free a bed (discharge, or mark Available) before adding a resident.</div>
       ) : (
@@ -1113,17 +1128,94 @@ function AddModal({ openBeds, onAdd, onCancel }){
           <L label="Name"><input value={f.name} onChange={e=>set("name",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
           <div style={{height:12}} />
           <div style={{ display:"flex", gap:12 }}>
-            <div style={{ flex:1 }}><L label="M/F"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
+            <div style={{ flex:1 }}><L label="M/F *"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
             <div style={{ flex:1 }}><L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L></div>
           </div>
           <div style={{height:12}} />
-          <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+          <L label="Payer *"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+          <div style={{ fontSize:11, color:BRAND.inkSoft, marginTop:6 }}>* Name, room, M/F and payer are required.</div>
           <div style={{height:16}} />
         </>
       )}
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-        <button disabled={noBeds || !f.name || !f.bedId} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!noBeds && f.name && f.bedId)?BRAND.ink:"#aaa" }}>Add</button>
+        <button disabled={noBeds || !f.name || !f.bedId || !f.payer || !f.mf} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!noBeds && f.name && f.bedId && f.payer && f.mf)?BRAND.ink:"#aaa" }}>Add</button>
+      </div>
+    </Overlay>
+  );
+}
+
+function PayerChanges({ res, facility }){
+  const payerName=(c)=>{ const hit=PAYERS.find(([n,code])=>code===c); return hit?hit[0]:(c||"—"); };
+  // Flatten every resident's payerLog into one dated list, newest first.
+  const changes = [];
+  res.forEach(r => (r.payerLog||[]).forEach(h => changes.push({ name:r.name, room:r.room, date:h.date, from:h.from, to:h.to })));
+  changes.sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+  const exportChanges = () => {
+    const out = [["Date","Resident","Room","From","To"]];
+    changes.forEach(c => out.push([c.date, c.name, c.room, payerName(c.from), payerName(c.to)]));
+    downloadCSV(`Payer_changes_${facility.replace(/\s+/g,"_")}_${todayISO()}.csv`, out);
+  };
+  return (
+    <div className="rounded-xl" style={{ background:BRAND.card, border:`1px solid ${BRAND.line}`, overflow:"hidden" }}>
+      <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom:`1px solid ${BRAND.line}` }}>
+        <div style={{ fontFamily:BB_SERIF, fontSize:15 }}>Payer changes</div>
+        <button onClick={exportChanges} disabled={!changes.length} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", color:changes.length?BRAND.ink:"#bbb", cursor:changes.length?"pointer":"default" }}>Export</button>
+      </div>
+      <div style={{ maxHeight:260, overflowY:"auto" }}>
+        {changes.length===0 ? (
+          <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>No payer changes recorded yet. When you change a resident's payer, it's logged here with its effective date.</div>
+        ) : changes.map((c,i)=>(
+          <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none" }}>
+            <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
+            <div style={{ fontSize:12, color:BRAND.inkSoft }}>{payerName(c.from)} → {payerName(c.to)} · {c.date}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EditResidentModal({ resident, onCancel, onSave }){
+  const [f,setF]=useState({ name:resident?.name||"", mf:resident?.mf||"", vent:!!resident?.vent, payer:resident?.payer||"" });
+  const [effDate,setEffDate]=useState(todayISO());
+  const set=(k,v)=>setF(s=>({...s,[k]:v}));
+  const payerChanged = f.payer !== (resident?.payer||"");
+  const payerName=(c)=>{ const hit=PAYERS.find(([n,code])=>code===c); return hit?hit[0]:(c||"—"); };
+  const history = resident?.payerLog || [];
+  return (
+    <Overlay>
+      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:4 }}>Edit resident</div>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:12 }}>Room {resident?.room} — {resident?.wing}</div>
+      <L label="Name"><input value={f.name} onChange={e=>set("name",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
+      <div style={{height:12}} />
+      <div style={{ display:"flex", gap:12 }}>
+        <div style={{ flex:1 }}><L label="M/F"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
+        <div style={{ flex:1 }}><L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L></div>
+      </div>
+      <div style={{height:12}} />
+      <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+      {payerChanged && (
+        <>
+          <div style={{height:12}} />
+          <L label="Payer change effective date"><input type="date" value={effDate} max={todayISO()} onChange={e=>setEffDate(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
+          <div style={{ fontSize:12, color:BRAND.inkSoft, marginTop:6 }}>Recorded as: {payerName(resident?.payer)} → {payerName(f.payer)} on {effDate}. You can backdate this.</div>
+        </>
+      )}
+      {history.length > 0 && (
+        <div style={{ marginTop:14, borderTop:`1px solid ${BRAND.line}`, paddingTop:10 }}>
+          <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft, marginBottom:6 }}>Payer history</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            {history.slice().reverse().map((h,i)=>(
+              <div key={i} style={{ fontSize:12, color:BRAND.ink }}>{h.date} · {payerName(h.from)} → {payerName(h.to)}</div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{height:16}} />
+      <div className="flex justify-end gap-2">
+        <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+        <button disabled={!f.name} onClick={()=>onSave({ ...f, _payerChanged:payerChanged, _effDate:effDate, _prevPayer:resident?.payer||"" })} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:f.name?BRAND.ink:"#aaa" }}>Save</button>
       </div>
     </Overlay>
   );
@@ -1219,6 +1311,14 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
     </Overlay>
   );
 }
+
+
+const inpStyle = { width: "100%", padding: "8px 12px", borderRadius: 8, border: `1px solid ${BRAND.line}`, fontSize: 14, outline: "none", background: "#fff", color: BRAND.ink };
+const In = ({ v, on, type = "text", autoFocus }) => <input type={type} autoFocus={autoFocus} style={inpStyle} value={v} onChange={(e) => on(e.target.value)} />;
+const Sel = ({ v, on, options }) => <select style={inpStyle} value={v} onChange={(e) => on(e.target.value)}>{options.map((o) => <option key={o}>{o}</option>)}</select>;
+const Grid2 = ({ children }) => <div className="grid grid-cols-2 gap-3">{children}</div>;
+const Field = ({ label, children }) => <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>{label}</span>{children}</label>;
+const Eyebrow = ({ children }) => <div className="text-[11px] uppercase tracking-[0.22em] mb-2 flex items-center gap-2" style={{ color: BRAND.tanDeep }}><Crown size={16} /> {children}</div>;
 
 function L({ label, children }){
   return (<label className="block"><span style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft }}>{label}</span><div className="mt-1">{children}</div></label>);
@@ -2845,29 +2945,6 @@ function NoticeModal({ onClose }) {
 }
 const Para = ({ t, b }) => <div><div className="font-semibold mb-1" style={{ fontFamily: SERIF, fontSize: 15 }}>{t}</div><p style={{ color: BRAND.inkSoft }}>{b}</p></div>;
 
-function IncidentModal({ onClose }) {
-  return (
-    <Modal title="Report a privacy incident" onClose={onClose}>
-      <p className="text-sm mb-3" style={{ color: BRAND.ink, lineHeight: 1.5 }}>
-        If you suspect any unauthorized access, disclosure, or potential breach of resident or employee information, report it immediately to:
-      </p>
-      <div className="rounded-lg p-4 mb-4 text-sm" style={{ background: BRAND.lineSoft, color: BRAND.ink }}>
-        <div className="font-medium">Facility Privacy Officer / Information Security Officer</div>
-        <div style={{ color: BRAND.inkSoft }}>Add contact name, phone, and email here.</div>
-      </div>
-      <p className="text-xs" style={{ color: BRAND.inkSoft }}>In the live version this button files a logged, timestamped report and notifies the Privacy Officer directly.</p>
-      <div className="flex justify-end mt-4"><button onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-white" style={{ background: BRAND.ink }}>Close</button></div>
-    </Modal>
-  );
-}
-
-/* ============================ Shared UI ============================ */
-const inpStyle = { width: "100%", padding: "8px 12px", borderRadius: 8, border: `1px solid ${BRAND.line}`, fontSize: 14, outline: "none", background: "#fff", color: BRAND.ink };
-const In = ({ v, on, type = "text", autoFocus }) => <input type={type} autoFocus={autoFocus} style={inpStyle} value={v} onChange={(e) => on(e.target.value)} />;
-const Sel = ({ v, on, options }) => <select style={inpStyle} value={v} onChange={(e) => on(e.target.value)}>{options.map((o) => <option key={o}>{o}</option>)}</select>;
-const Grid2 = ({ children }) => <div className="grid grid-cols-2 gap-3">{children}</div>;
-const Field = ({ label, children }) => <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>{label}</span>{children}</label>;
-const Eyebrow = ({ children }) => <div className="text-[11px] uppercase tracking-[0.22em] mb-2 flex items-center gap-2" style={{ color: BRAND.tanDeep }}><Crown size={16} /> {children}</div>;
 
 function SectionHead({ title, right, stats }) {
   return (
