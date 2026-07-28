@@ -641,7 +641,19 @@ function BedboardModule({ facility: fac, canImport }){
   const [viewDate, setViewDate] = useState(null); // null = live/today; else an ISO date to view historically
   const viewing = !!viewDate && viewDate !== todayISO();
   // What the grid shows: live res, or a past day's snapshot (read-only).
-  const displayRes = viewing ? (bedboardStore.history[facility]?.[viewDate] || []) : res;
+  // When viewing a past date: use that day's snapshot, or if none was saved that day
+  // (nobody changed the board), carry forward the most recent snapshot on/before it —
+  // because the board looked the same as the last day it was saved.
+  const snapForDate = (fac, iso) => {
+    const hist = bedboardStore.history[fac] || {};
+    if (hist[iso]) return { rows: hist[iso], actual: true, asOf: iso };
+    const priorDays = Object.keys(hist).filter(d => d < iso).sort();
+    const last = priorDays[priorDays.length - 1];
+    return last ? { rows: hist[last], actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
+  };
+  const _snap = viewing ? snapForDate(facility, viewDate) : { rows: res, actual: true, asOf: viewDate };
+  const displayRes = viewing ? _snap.rows : res;
+  const carriedFrom = viewing && !_snap.actual ? _snap.asOf : null; // if set, board is carried forward from this earlier date
   const [adding, setAdding] = useState(false);
   const [modal, setModal] = useState(null); // {id, status}
   const [shuffleFor, setShuffleFor] = useState(null); // resident id whose status was set to Room Move
@@ -852,13 +864,13 @@ function BedboardModule({ facility: fac, canImport }){
 
         {viewing && (
           <div className="rounded-lg px-4 py-2.5 mb-4 flex items-center justify-between" style={{ background:"#f3ece1", border:`1px solid #d9c489`, color:BRAND.ink }}>
-            <span style={{ fontSize:13 }}>📅 Viewing the board as it was on <b>{viewDate}</b> — historical snapshot.</span>
+            <span style={{ fontSize:13 }}>📅 Viewing the board as it was on <b>{viewDate}</b> — historical snapshot.{carriedFrom ? <> No changes were saved on this date, so this shows the board as it stood on <b>{carriedFrom}</b> (the last day it was updated).</> : null}</span>
             <button onClick={()=>setViewDate(null)} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>Back to today</button>
           </div>
         )}
         {viewing && displayRes.length===0 && (
           <div className="rounded-lg px-4 py-6 mb-4 text-center" style={{ background:BRAND.paper, border:`1px solid ${BRAND.line}`, color:BRAND.inkSoft, fontSize:13 }}>
-            No saved snapshot for {viewDate}. Daily history builds automatically going forward each day the board is saved — so past dates before today may not have data yet.
+            No board history on or before {viewDate} yet. Daily history builds automatically going forward each day the board is saved — so dates before the system started have no data.
           </div>
         )}
         <div className="grid gap-5" style={{ gridTemplateColumns:"1.5fr 1fr" }}>
