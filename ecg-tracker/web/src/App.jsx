@@ -3234,6 +3234,7 @@ function UserManager({ facilities, meId, onClose }) {
             </div>
           ))}
       </div>
+      )}
     </Modal>
   );
 }
@@ -3248,11 +3249,74 @@ const ACTION_LABEL = {
 function AuditLog({ onClose }) {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
-  const load = async () => { setErr(""); try { setRows(await api("/api/audit")); } catch (e) { setErr(e.message); } };
+  const [tab, setTab] = useState("daily");
+  const [facId, setFacId] = useState((typeof FACILITIES!=="undefined" && FACILITIES[0]?.id) || "");
+  const [days, setDays] = useState(14);
+  const load = async () => { setErr(""); try { setRows(await api("/api/audit?limit=2000")); } catch (e) { setErr(e.message); } };
   useEffect(() => { load(); }, []);
+
+  const PAGES = (typeof MODULES!=="undefined" ? MODULES : []).map(m => ({ key:m.key, label:m.label }));
+  const dayList = (() => { const out=[]; for (let i=0;i<days;i++){ const d=new Date(); d.setDate(d.getDate()-i); out.push(d.toISOString().slice(0,10)); } return out; })();
+  const facName = (typeof FACILITIES!=="undefined" ? FACILITIES.find(f=>f.id===facId)?.name : "") || "";
+  const grid = {};
+  if (rows) {
+    PAGES.forEach(p => grid[p.key] = {});
+    rows.forEach(r => {
+      if (!["create","update","delete"].includes(r.action)) return;
+      if (facName && r.facilityName !== facName) return;
+      if (!r.module) return;
+      const day = new Date(r.at).toISOString().slice(0,10);
+      if (!grid[r.module]) grid[r.module] = {};
+      (grid[r.module][day] = grid[r.module][day] || new Set()).add((r.email||"?").split("@")[0]);
+    });
+  }
+  const shortDay = (iso) => { const d=new Date(iso+"T00:00:00"); return (d.getMonth()+1)+"/"+d.getDate(); };
+
   return (
     <Modal title="Activity log" onClose={onClose} wide>
-      <p className="text-sm mb-3" style={{ color: BRAND.inkSoft }}>A running record of sign-ins and every change — newest first, most recent 200. Entries are only ever added.</p>
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <button onClick={()=>setTab("daily")} className="text-xs rounded-md px-3 py-1.5" style={{ background: tab==="daily"?BRAND.ink:"#fff", color: tab==="daily"?"#fff":BRAND.ink, border:`1px solid ${BRAND.line}` }}>Daily updates</button>
+        <button onClick={()=>setTab("full")} className="text-xs rounded-md px-3 py-1.5" style={{ background: tab==="full"?BRAND.ink:"#fff", color: tab==="full"?"#fff":BRAND.ink, border:`1px solid ${BRAND.line}` }}>Full log</button>
+      </div>
+      {tab==="daily" ? (
+        <>
+          <div className="flex items-center gap-3 mb-3 flex-wrap">
+            <select value={facId} onChange={e=>setFacId(e.target.value)} className="text-sm rounded-md px-2 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>
+              {(typeof FACILITIES!=="undefined"?FACILITIES:[]).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+            <select value={days} onChange={e=>setDays(Number(e.target.value))} className="text-sm rounded-md px-2 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>
+              <option value={7}>Last 7 days</option><option value={14}>Last 14 days</option><option value={30}>Last 30 days</option>
+            </select>
+            <span className="text-xs" style={{ color: BRAND.inkSoft }}>Hover a check to see who updated that page that day.</span>
+          </div>
+          {err && <div className="text-xs mb-2" style={{ color: TONE.bad.fg }}>{err}</div>}
+          {rows===null ? <div className="px-4 py-5 text-sm" style={{ color: BRAND.inkSoft }}>Loading…</div> : (
+            <div className="rounded-xl" style={{ border:`1px solid ${BRAND.line}`, overflowX:"auto", maxHeight:"60vh", overflowY:"auto" }}>
+              <table className="text-xs" style={{ borderCollapse:"collapse", width:"100%" }}>
+                <thead>
+                  <tr style={{ background: BRAND.paper }}>
+                    <th className="px-2 py-2 text-left" style={{ position:"sticky", left:0, background:BRAND.paper, minWidth:130 }}>Page</th>
+                    {dayList.map(d=><th key={d} className="px-1.5 py-2 text-center" style={{ whiteSpace:"nowrap", color:BRAND.inkSoft }}>{shortDay(d)}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PAGES.map(p=>(
+                    <tr key={p.key} style={{ borderTop:`1px solid ${BRAND.lineSoft}` }}>
+                      <td className="px-2 py-2" style={{ position:"sticky", left:0, background:"#fff", fontWeight:500, whiteSpace:"nowrap" }}>{p.label}</td>
+                      {dayList.map(d=>{
+                        const who = grid[p.key]?.[d];
+                        return <td key={d} className="px-1.5 py-2 text-center" title={who?[...who].join(", "):"No update recorded"} style={{ background: who?TONE.ok.bg:"transparent", color: who?TONE.ok.fg:"#ccc" }}>{who?"\u2713":"\u00b7"}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="text-[11px] mt-2" style={{ color: BRAND.inkSoft }}>Shows record additions, edits and deletions per page. Hover a check to see who updated it that day.</div>
+        </>
+      ) : (
+        <>
       {err && <div className="text-xs mb-2" style={{ color: TONE.bad.fg }}>{err}</div>}
       <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${BRAND.line}`, maxHeight: "60vh", overflowY: "auto" }}>
         {rows === null ? <div className="px-4 py-5 text-sm" style={{ color: BRAND.inkSoft }}>Loading…</div>
@@ -3265,6 +3329,8 @@ function AuditLog({ onClose }) {
             </div>
           ))}
       </div>
+        </>
+      )}
     </Modal>
   );
 }
