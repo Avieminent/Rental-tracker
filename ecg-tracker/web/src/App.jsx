@@ -751,6 +751,14 @@ const bedboardStore = {
     return { count: affected.length + (reachesToday ? 1 : 0), from: fromISO, stopBefore, tenancyEnd, reachesToday };
   },
   editFieldForward(fac, bedId, field, value, fromISO) {
+    const hist0 = this.history[fac] = this.history[fac] || {};
+    // If the effective day has no saved snapshot (quiet day), materialize one from the
+    // carried-forward board so the change is visible ON that day, not just after it.
+    if (!hist0[fromISO]) {
+      const priorDays = Object.keys(hist0).filter(d => d < fromISO).sort();
+      const last = priorDays[priorDays.length - 1];
+      if (last && Array.isArray(hist0[last])) hist0[fromISO] = hist0[last].map(x => ({ ...x }));
+    }
     const prev = this.previewFieldForward(fac, bedId, field, value, fromISO);
     const hist = this.history[fac] = this.history[fac] || {};
     const days = Object.keys(hist).filter(d => d >= fromISO).sort();
@@ -980,10 +988,20 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   // because the board looked the same as the last day it was saved.
   const snapForDate = (fac, iso) => {
     const hist = bedboardStore.history[fac] || {};
+    // When carrying an older snapshot forward to a quiet day, remove anyone who LEFT
+    // in between — otherwise a discharged resident would still show on days after they left.
+    const scrubCarried = (rows, asOf) => {
+      const gone = bedboardStore.getLeft(fac).filter(p => p.leftDate > asOf && p.leftDate <= iso);
+      if (!gone.length) return rows;
+      return rows.map(r => {
+        const hit = gone.find(p => (r.residentId && r.residentId === p.id) || (!r.residentId && r.name && r.name === p.name));
+        return hit ? { id: r.id, wing: r.wing, room: r.room, residentId: null, name:"", status:"Available", mf:"", vent:false, payer:"", hosp:{}, disc:{}, death:{} } : r;
+      });
+    };
     if (hist[iso]) return { rows: hist[iso], actual: true, asOf: iso };
     const priorDays = Object.keys(hist).filter(d => d < iso).sort();
     const last = priorDays[priorDays.length - 1];
-    return last ? { rows: hist[last], actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
+    return last ? { rows: scrubCarried(hist[last], last), actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
   };
   const _snap = viewing ? snapForDate(facility, viewDate) : { rows: res, actual: true, asOf: viewDate };
   // Overlay: residents who LEFT (discharged/deceased/hosp-gone) show on the census for their event day.
@@ -994,10 +1012,11 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const displayRes = _leftToday.length === 0 ? _baseRows : (() => {
     const rows = _baseRows.map(r => ({ ...r }));
     _leftToday.forEach(p => {
-      const bed = rows.find(r => r.id === p.bedIdAtExit);
+      // Always an EXTRA read-only row — the bed row itself stays visible and fully usable
+      // (Available, can take a new admit) even on the event day.
       const asRow = { ...p, _left: true, id: "left-" + p.id, status: p.leftStatus, disc: p.leftReason==="Discharged" ? p.leftDetail : (p.disc||{}), death: p.leftReason==="Deceased" ? p.leftDetail : (p.death||{}), hosp: p.leftReason==="Hospitalization" ? p.leftDetail : (p.hosp||{}) };
-      if (bed && !bed.name) { Object.assign(bed, asRow, { id: bed.id }); }
-      else rows.push(asRow);
+      const bedIdx = rows.findIndex(r => r.id === p.bedIdAtExit);
+      if (bedIdx >= 0) rows.splice(bedIdx + 1, 0, asRow); else rows.push(asRow);
     });
     return rows;
   })();
@@ -1290,7 +1309,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                             <select disabled={viewing || r._left} value={r.vent?"Y":"N"} onChange={e=>{
                               const nv = e.target.value==="Y";
                               setRes(rs=>rs.map(x=>x.id===r.id?{...x, vent:nv, payerLog:[...(x.payerLog||[]), { kind:"vent", date:todayISO(), loggedDate:todayISO(), from:x.vent?"Yes":"No", to:nv?"Yes":"No" }]}:x));
-                            }} style={{ fontSize:12, padding:"2px 3px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
+                            }} style={{ fontSize:12, padding:"2px 2px", borderRadius:6, border:`1px solid ${BRAND.line}`, width:"48px", maxWidth:"48px", opacity:(viewing||r._left)?0.7:1 }}>
                               <option value="N">No</option><option value="Y">Yes</option>
                             </select>
                           </td>
@@ -1370,7 +1389,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
       {editFor && <EditResidentModal
         resident={(viewing?displayRes:res).find(r=>r.id===editFor)}
         viewDate={viewing?viewDate:null}
-        previewForward={(field,value)=>bedboardStore.previewFieldForward(facility, editFor, field, value, viewDate)}
+        previewForward={(field,value,effDate)=>bedboardStore.previewFieldForward(facility, editFor, field, value, effDate||viewDate)}
         onCancel={()=>setEditFor(null)}
         onSave={(d)=>{
           if (viewing) {
@@ -1382,16 +1401,17 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
               return;
             }
             // Past-date correction: apply each changed field from viewDate forward (stopping at next change).
+            const effD = d._pastEffDate || viewDate;
             if (d._ventChanged) {
-              bedboardStore.editFieldForward(facility, editFor, "vent", d.vent, viewDate);
-              bedboardStore.logChange(facility, editFor, { kind:"vent", date: viewDate, loggedDate: todayISO(), from: d.vent ? "No" : "Yes", to: d.vent ? "Yes" : "No" });
+              bedboardStore.editFieldForward(facility, editFor, "vent", d.vent, effD);
+              bedboardStore.logChange(facility, editFor, { kind:"vent", date: effD, loggedDate: todayISO(), from: d.vent ? "No" : "Yes", to: d.vent ? "Yes" : "No" });
             }
             if (d._payerFwd) {
-              bedboardStore.editFieldForward(facility, editFor, "payer", d.payer, viewDate);
-              bedboardStore.logChange(facility, editFor, { kind:"payer", date: viewDate, loggedDate: todayISO(), from: d._prevPayer, to: d.payer });
+              bedboardStore.editFieldForward(facility, editFor, "payer", d.payer, effD);
+              bedboardStore.logChange(facility, editFor, { kind:"payer", date: effD, loggedDate: todayISO(), from: d._prevPayer, to: d.payer });
             }
-            if (d._statusChanged) bedboardStore.editFieldForward(facility, editFor, "status", d.status, viewDate);
-            toast("Record corrected from " + viewDate + " forward.");
+            if (d._statusChanged) bedboardStore.editFieldForward(facility, editFor, "status", d.status, effD);
+            toast("Record corrected from " + effD + " forward.");
           } else {
             setRes(rs=>rs.map(r=> {
               if (r.id!==editFor) return r;
@@ -1719,7 +1739,8 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
   const history = resident?.payerLog || [];
 
   const anyPastChange = ventChanged || payerChanged || statusChanged;
-  const fwd = (field,val) => { try { return previewForward ? previewForward(field,val) : null; } catch { return null; } };
+  const [pastEff, setPastEff] = useState(viewDate || todayISO());
+  const fwd = (field,val) => { try { return previewForward ? previewForward(field,val,pastEff) : null; } catch { return null; } };
 
   if (past) {
     return (
@@ -1727,6 +1748,8 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
         <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:4 }}>Correct record</div>
         <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:4 }}>{resident?.name} · Room {resident?.room}</div>
         <div style={{ fontSize:12, color:BRAND.inkSoft, marginBottom:12, background:"#f3ece1", border:`1px solid #d9c489`, borderRadius:6, padding:"6px 8px" }}>Changes here apply from <b>{viewDate}</b> forward, and stop automatically if the value already changed on a later date. Name and M/F aren't backdated here. To record a backdated <b>discharge, death, hospitalization or room move</b>, go back to today's board, pick the status from the dropdown, and set the actual date in the popup.</div>
+        <L label="Effective date of these changes"><input type="date" value={pastEff} max={todayISO()} onChange={e=>setPastEff(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
+        <div style={{ height:8 }} />
         <L label="Status"><select value={f.status} onChange={e=>set("status",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{STATUS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></L>
         <div style={{height:12}} />
         <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
@@ -1743,7 +1766,7 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
         <div style={{height:16}} />
         <div className="flex justify-end gap-2">
           <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-          <button disabled={!anyPastChange} onClick={()=>onSave({ ...f, _ventChanged:ventChanged, _payerFwd:payerChanged, _statusChanged:statusChanged })} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:anyPastChange?BRAND.ink:"#aaa" }}>Apply correction</button>
+          <button disabled={!anyPastChange} onClick={()=>onSave({ ...f, _ventChanged:ventChanged, _payerFwd:payerChanged, _statusChanged:statusChanged , _pastEffDate: pastEff})} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:anyPastChange?BRAND.ink:"#aaa" }}>Apply correction</button>
         </div>
       </Overlay>
     );
@@ -1908,20 +1931,21 @@ function RehospModule({ facility }) {
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
   const [eventWarn, setEventWarn] = useState(null);
-  const applyStatus = (id, status, detail) => {
+  const applyStatus = (id, status, detail, whenISO) => {
     setRes((rs) => rs.map((r) => {
       if (r.id !== id) return r;
       const n = { ...r, status };
       if (r.status === "Hospitalization" && IN_FACILITY.includes(status) && r.hosp?.date && !r.hosp.returned)
-        n.hosp = { ...r.hosp, returned: todayISO() };
+        n.hosp = { ...r.hosp, returned: whenISO || todayISO() };
       if (status === "Discharged") n.disc = { ...detail };
       if (status === "Deceased") n.death = { ...detail };
       return n;
     }));
   };
+  const [returnPrompt, setReturnPrompt] = useState(null); // { id, status, date } — asks when the change happened
   const rowStatus = (id, status) => {
     if (TERMINAL.includes(status)) { setModal({ id, status }); return; }
-    applyStatus(id, status);
+    setReturnPrompt({ id, status, date: todayISO() });
   };
   const events = [];
   res.forEach((r) => {
@@ -2045,6 +2069,21 @@ function RehospModule({ facility }) {
           </div>
         </div>
       )}
+      {returnPrompt && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>When did this happen?</div>
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:10 }}>
+          {res.find(r=>r.id===returnPrompt.id)?.name} → <b>{returnPrompt.status}</b>
+        </div>
+        <L label="Date of the change"><input type="date" value={returnPrompt.date} max={todayISO()}
+          onChange={e=>setReturnPrompt(p=>({ ...p, date: e.target.value }))}
+          className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
+        <div style={{ height:12 }} />
+        <div className="flex justify-end gap-2">
+          <button onClick={()=>setReturnPrompt(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button disabled={!returnPrompt.date} onClick={()=>{ applyStatus(returnPrompt.id, returnPrompt.status, null, returnPrompt.date); setReturnPrompt(null); }}
+            className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Confirm</button>
+        </div>
+      </Overlay>}
       {modal && <EventModal spec={modal} resident={res.find((r) => r.id === modal.id)}
         onCancel={() => setModal(null)}
         onConfirm={(detail) => {
@@ -3228,7 +3267,11 @@ function Rentals({ facility, data, update }) {
     const d = derive(it);
     if (RENT_CLOSED.includes(rentStatusOf(it))) return { ...d, rec: "done" };
     const st = (it.residentId && statusById[it.residentId]) || statusByName[nameKey(it.resident)];
-    return TERMINAL.includes(st) ? { ...d, rec: "gone" } : d;
+    if (TERMINAL.includes(st)) return { ...d, rec: "gone" };
+    // No current resident matches this rental (empty room / person no longer anywhere in the
+    // system) — nobody is using it, so it needs attention/return.
+    if (st === undefined && (it.resident || "").trim()) return { ...d, rec: "gone" };
+    return d;
   };
   const censusResidents = bbRes.filter((r) => r.name && !TERMINAL.includes(r.status) && r.status !== "Available" && r.status !== "Blocked").map((r) => ({ name: r.name, room: r.room, residentId: r.residentId }));
   // Residents who have left (discharged/deceased/hospital) — a rental can still be logged
