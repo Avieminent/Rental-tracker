@@ -686,6 +686,27 @@ const bedboardStore = {
     this.persist(fac);
   },
 
+  // Write a status (e.g. a backdated hospitalization) onto saved days from a date forward,
+  // for the person currently on the bed. Materializes the first day if it wasn't saved.
+  backdateStatusDays(fac, bedId, fromISO, patch) {
+    const bed = (this.beds[fac] || []).find(b => b.id === bedId);
+    const p = bed && bed.residentId ? (this.people[fac] || {})[bed.residentId] : null;
+    if (!p) return;
+    const hist = this.history[fac] = this.history[fac] || {};
+    if (!hist[fromISO]) {
+      const prior = Object.keys(hist).filter(d => d < fromISO).sort();
+      const last = prior[prior.length - 1];
+      if (last && Array.isArray(hist[last])) hist[fromISO] = hist[last].map(x => ({ ...x }));
+    }
+    const isP = (x) => (x.residentId && x.residentId === p.id) || (!x.residentId && (x.name || "") === p.name);
+    Object.keys(hist).forEach(day => {
+      if (day >= fromISO && day < todayISO() && Array.isArray(hist[day]))
+        hist[day] = hist[day].map(x => isP(x) ? { ...x, ...patch } : x);
+    });
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
+
   // ---- Later-activity scan for the backdate warning (by resident id, name fallback for old days). ----
   laterActivity(fac, bedId, fromISO) {
     // Person-based: find WHO is on this bed now, then scan every history row that belongs
@@ -1285,9 +1306,10 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                   <thead><tr style={{ color:BRAND.inkSoft, textAlign:"left" }}>
                     <th className="px-2 py-1 font-medium" style={{width:"58px"}}>Room</th>
                     <th className="px-2 py-1 font-medium">Name</th>
-                    <th className="px-2 py-1 font-medium" style={{width:"38px"}}>M/F</th>
-                    <th className="px-2 py-1 font-medium" style={{width:"42px"}}>Vent</th>
-                    <th className="px-2 py-1 font-medium" style={{width:"116px"}}>Status</th>
+                    <th className="px-2 py-1 font-medium" style={{width:"46px"}}>M/F</th>
+                    <th className="px-2 py-1 font-medium" style={{width:"54px"}}>Vent</th>
+                    <th className="px-2 py-1 font-medium" style={{width:"52px"}}>Payer</th>
+                    <th className="px-2 py-1 font-medium" style={{width:"122px"}}>Status</th>
                   </tr></thead>
                   <tbody>
                     {list.map(r => {
@@ -1309,10 +1331,11 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                             <select disabled={viewing || r._left} value={r.vent?"Y":"N"} onChange={e=>{
                               const nv = e.target.value==="Y";
                               setRes(rs=>rs.map(x=>x.id===r.id?{...x, vent:nv, payerLog:[...(x.payerLog||[]), { kind:"vent", date:todayISO(), loggedDate:todayISO(), from:x.vent?"Yes":"No", to:nv?"Yes":"No" }]}:x));
-                            }} style={{ fontSize:12, padding:"2px 2px", borderRadius:6, border:`1px solid ${BRAND.line}`, width:"48px", maxWidth:"48px", opacity:(viewing||r._left)?0.7:1 }}>
+                            }} style={{ fontSize:12, padding:"2px 2px", borderRadius:6, border:`1px solid ${BRAND.line}`, width:"46px", maxWidth:"46px", opacity:(viewing||r._left)?0.7:1 }}>
                               <option value="N">No</option><option value="Y">Yes</option>
                             </select>
                           </td>
+                          <td className="px-2 py-1.5" style={{ fontSize:12, color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{r.payer || "—"}</td>
                           <td className="px-1 py-1">
                             <select disabled={viewing || r._left} value={r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
                               {STATUS_LIST.map(s=><option key={s} value={s}>{s}</option>)}
@@ -1330,7 +1353,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           <div className="flex flex-col gap-3">
             <Legend res={displayRes} />
             <CensusTiles counts={counts} />
-            <PayerChanges res={displayRes} facility={facility} />
+            <PayerChanges res={res} facility={facility} />
             <ColorKey />
             <Section title="Activity report — today" cols={["Name","Time","Type","Room","Payer"]}
               rows={activity(res)} />
@@ -1377,7 +1400,13 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           const runEvent = () => {
             if (isTerminal) { bedboardStore.moveToLeft(facility, modal.id, modal.status, detail); toast(modal.status==="Deceased" ? "Recorded. Resident moved to the deceased list; bed freed." : "Recorded. Resident moved to the discharged list; bed freed."); }
             else if (isHospGone) { bedboardStore.moveToLeft(facility, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
-            else applyStatus(modal.id, modal.status, detail);
+            else {
+              applyStatus(modal.id, modal.status, detail);
+              // Backdated hospitalization that keeps the bed (bedhold / expected return):
+              // also mark the past days so the board on those dates shows them out.
+              if (modal.status === "Hospitalization" && detail.date && detail.date < todayISO())
+                bedboardStore.backdateStatusDays(facility, modal.id, detail.date, { status: "Hospitalization", hosp: { ...detail } });
+            }
             setModal(null); setEventWarn(null);
           };
           if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
@@ -1410,7 +1439,10 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
               bedboardStore.editFieldForward(facility, editFor, "payer", d.payer, effD);
               bedboardStore.logChange(facility, editFor, { kind:"payer", date: effD, loggedDate: todayISO(), from: d._prevPayer, to: d.payer });
             }
-            if (d._statusChanged) bedboardStore.editFieldForward(facility, editFor, "status", d.status, effD);
+            if (d._statusChanged) {
+              bedboardStore.editFieldForward(facility, editFor, "status", d.status, effD);
+              bedboardStore.logChange(facility, editFor, { kind:"status", date: effD, loggedDate: todayISO(), from: (viewing?displayRes:res).find(r=>r.id===editFor)?.status || "", to: d.status });
+            }
             toast("Record corrected from " + effD + " forward.");
           } else {
             setRes(rs=>rs.map(r=> {
@@ -1697,7 +1729,7 @@ function PayerChanges({ res, facility }){
   changes.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
   const exportChanges = () => {
     const out = [["Effective date","Logged on","Type","Resident","Room","From","To"]];
-    changes.forEach(c => out.push([c.date, c.loggedDate||c.date, c.kind==="vent"?"Vent":"Payer", c.name, c.room, c.kind==="vent"?c.from:payerName(c.from), c.kind==="vent"?c.to:payerName(c.to)]));
+    changes.forEach(c => out.push([c.date, c.loggedDate||c.date, c.kind==="vent"?"Vent":c.kind==="status"?"Status":"Payer", c.name, c.room, (c.kind==="vent"||c.kind==="status")?c.from:payerName(c.from), (c.kind==="vent"||c.kind==="status")?c.to:payerName(c.to)]));
     downloadCSV(`Payer_changes_${facility.replace(/\s+/g,"_")}_${todayISO()}.csv`, out);
   };
   return (
@@ -1713,7 +1745,7 @@ function PayerChanges({ res, facility }){
           <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none" }}>
             <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
             <div style={{ fontSize:12, color:BRAND.inkSoft }}>
-              {c.kind==="vent" ? <>Vent: {c.from} → {c.to}</> : <>{payerName(c.from)} → {payerName(c.to)}</>} · {c.date}
+              {c.kind==="vent" ? <>Vent: {c.from} → {c.to}</> : c.kind==="status" ? <>Status: {c.from} → {c.to}</> : <>{payerName(c.from)} → {payerName(c.to)}</>} · {c.date}
               {c.loggedDate && c.loggedDate!==c.date ? <span style={{ color:"#8a6d3f" }}> (logged {c.loggedDate})</span> : null}
             </div>
           </div>
@@ -1750,7 +1782,9 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
         <div style={{ fontSize:12, color:BRAND.inkSoft, marginBottom:12, background:"#f3ece1", border:`1px solid #d9c489`, borderRadius:6, padding:"6px 8px" }}>Changes here apply from <b>{viewDate}</b> forward, and stop automatically if the value already changed on a later date. Name and M/F aren't backdated here. To record a backdated <b>discharge, death, hospitalization or room move</b>, go back to today's board, pick the status from the dropdown, and set the actual date in the popup.</div>
         <L label="Effective date of these changes"><input type="date" value={pastEff} max={todayISO()} onChange={e=>setPastEff(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }} /></L>
         <div style={{ height:8 }} />
-        <L label="Status"><select value={f.status} onChange={e=>set("status",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{STATUS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></L>
+        <L label="Status"><select value={f.status} onChange={e=>set("status",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>
+                <option value={resident?.status || "Active"}>Keep current — {resident?.status || "Active"}</option>
+                {STATUS_OPTS.filter(k => k !== (resident?.status || "Active")).map(o=><option key={o} value={o}>{o}</option>)}</select></L>
         <div style={{height:12}} />
         <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
         <div style={{height:12}} />
@@ -2092,7 +2126,11 @@ function RehospModule({ facility }) {
           const runEvent = () => {
             if (isTerminal) { bedboardStore.moveToLeft(facility.name, modal.id, modal.status, detail); toast("Recorded. Resident moved to the " + (modal.status==="Deceased"?"deceased":"discharged") + " list; bed freed."); }
             else if (isHospGone) { bedboardStore.moveToLeft(facility.name, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
-            else applyStatus(modal.id, modal.status, detail);
+            else {
+              applyStatus(modal.id, modal.status, detail);
+              if (modal.status === "Hospitalization" && detail.date && detail.date < todayISO())
+                bedboardStore.backdateStatusDays(facility.name, modal.id, detail.date, { status: "Hospitalization", hosp: { ...detail } });
+            }
             setModal(null); setEventWarn(null);
           };
           if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
@@ -3270,7 +3308,7 @@ function Rentals({ facility, data, update }) {
     if (TERMINAL.includes(st)) return { ...d, rec: "gone" };
     // No current resident matches this rental (empty room / person no longer anywhere in the
     // system) — nobody is using it, so it needs attention/return.
-    if (st === undefined && (it.resident || "").trim()) return { ...d, rec: "gone" };
+    if (st === undefined) return { ...d, rec: "gone" };
     return d;
   };
   const censusResidents = bbRes.filter((r) => r.name && !TERMINAL.includes(r.status) && r.status !== "Available" && r.status !== "Blocked").map((r) => ({ name: r.name, room: r.room, residentId: r.residentId }));
