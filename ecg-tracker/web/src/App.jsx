@@ -1180,6 +1180,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const counts = useMemo(() => {
     let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0;
     displayRes.forEach(r => {
+      if (r._left) return; // record-rows of departed residents don't count as beds
       if (holdsBed(r)) occ++;
       if (r.status==="Available") avail++;
       if (r.status==="Hospitalization") hosp++;
@@ -1205,7 +1206,13 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
-    const freed = TERMINAL.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y");
+    // Overlay record-rows (someone who left, shown on their event day): show WHO it was,
+    // with their real status colors — the row is read-only; the bed row above it is the live bed.
+    if (r._left) {
+      const st = STATUS[r.status] || STATUS.Available;
+      return { st, shown: (r.name || "(no name)") + "  ·  left " + (r.leftDate || ""), freed: false };
+    }
+    const freed = TERMINAL.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn!=="Y");
     const st = freed ? STATUS.Available : (STATUS[r.status] || STATUS.Available);
     const shown = (freed || r.status==="Available" || r.status==="Blocked") ? "—" : r.name;
     return { st, shown, freed };
@@ -1224,7 +1231,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             <div className="flex items-center gap-3">
               <div style={{ fontFamily:BB_SERIF, fontSize:26 }}>Bedboard</div>
             </div>
-            <div style={{ color:BRAND.inkSoft, fontSize:13 }}>Daily bed board &amp; census · preview (changes reset on refresh)</div>
+            <div style={{ color:BRAND.inkSoft, fontSize:13 }}>Daily bed board &amp; census · changes save automatically</div>
           </div>
           <div className="flex flex-col items-end gap-2">
             {/* Top row — Export / Import, both same color */}
@@ -1294,8 +1301,9 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         <div className="grid gap-5" style={{ gridTemplateColumns:"1.5fr 1fr" }}>
           <div className="flex flex-col gap-4">
             {wings.map(([wing, list]) => {
-              const occ = list.filter(holdsBed).length;
-              const av = list.length - occ;
+              const bedsOnly = list.filter(r => !r._left);
+              const occ = bedsOnly.filter(holdsBed).length;
+              const av = bedsOnly.length - occ;
               return (
               <div key={wing} className="rounded-xl overflow-hidden" style={{ background:BRAND.card, border:`1px solid ${BRAND.line}` }}>
                 <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom:`1px solid ${BRAND.line}` }}>
@@ -1323,7 +1331,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                               : shown}
                           </td>
                           <td className="px-2 py-1.5">
-                            <select disabled={viewing} value={r.mf} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,mf:e.target.value}:x))} style={{ fontSize:12, fontWeight:600, borderRadius:6, padding:"1px 4px", border:"none", background: r.mf==="M" ? "#dbeafe" : r.mf==="F" ? "#fbe1ec" : "transparent", color: r.mf==="M" ? "#1e40af" : r.mf==="F" ? "#9d266b" : BRAND.ink }}>
+                            <select disabled={viewing || r._left} value={r.mf} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,mf:e.target.value}:x))} style={{ fontSize:12, fontWeight:600, borderRadius:6, padding:"1px 4px", border:"none", background: r.mf==="M" ? "#dbeafe" : r.mf==="F" ? "#fbe1ec" : "transparent", color: r.mf==="M" ? "#1e40af" : r.mf==="F" ? "#9d266b" : BRAND.ink }}>
                               <option value=""></option><option>M</option><option>F</option>
                             </select>
                           </td>
