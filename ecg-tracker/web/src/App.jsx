@@ -1411,11 +1411,28 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           };
           if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
             const acts = bedboardStore.laterActivity(facility, modal.id, detail.date);
-            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date }); return; }
+            // Later activity exists after the backdated event: only administrators may proceed.
+            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date, blocked: !isAdmin }); return; }
           }
           runEvent();
         }} />}
-      {eventWarn && <Overlay>
+      {eventWarn && eventWarn.blocked && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>This change needs an administrator</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
+          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
+        </div>
+        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
+          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
+        </ul>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:14, lineHeight:1.5 }}>
+          Because there were changes after that date, only an administrator can make this backdated change.
+          Please email <b>centralc@eminentcaregroup.com</b>.
+        </div>
+        <div className="flex justify-end">
+          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK</button>
+        </div>
+      </Overlay>}
+      {eventWarn && !eventWarn.blocked && <Overlay>
         <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
         <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
           You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
@@ -1977,7 +1994,7 @@ function Overlay({ children }){
 const bbDayOfWeek = (iso) => { if (!iso) return "—"; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? "—" : d.toLocaleDateString(undefined, { weekday: "long" }); };
 const bbShift = (hm) => { const h = parseInt(String(hm || "").slice(0, 2), 10); if (isNaN(h)) return "—"; if (h >= 7 && h < 15) return "Day (7a–3p)"; if (h >= 15 && h < 23) return "Evening (3p–11p)"; return "Night (11p–7a)"; };
 
-function RehospModule({ facility }) {
+function RehospModule({ facility, isAdmin }) {
   const [res, setRes] = useBedboard(facility.name);
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
@@ -2161,11 +2178,27 @@ function RehospModule({ facility }) {
           };
           if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
             const acts = bedboardStore.laterActivity(facility.name, modal.id, detail.date);
-            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date }); return; }
+            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date, blocked: !isAdmin }); return; }
           }
           runEvent();
         }} />}
-      {eventWarn && <Overlay>
+      {eventWarn && eventWarn.blocked && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>This change needs an administrator</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
+          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
+        </div>
+        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
+          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
+        </ul>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:14, lineHeight:1.5 }}>
+          Because there were changes after that date, only an administrator can make this backdated change.
+          Please email <b>centralc@eminentcaregroup.com</b>.
+        </div>
+        <div className="flex justify-end">
+          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK</button>
+        </div>
+      </Overlay>}
+      {eventWarn && !eventWarn.blocked && <Overlay>
         <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
         <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
           You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
@@ -3303,7 +3336,7 @@ function Facility({ facility, module, setModule, data, update, role, allowedPage
       {module === "roster" && <RosterModule key={facility.id} facility={facility} data={data} update={update} />}
       {module === "budget" && <DeptBudgetModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} isAdmin={role === "admin"} />}
-      {module === "rehosp" && <RehospModule key={facility.id} facility={facility} />}
+      {module === "rehosp" && <RehospModule key={facility.id} facility={facility} isAdmin={role === "admin"} />}
       {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || (Array.isArray(auth.user.pages) && auth.user.pages.includes("rfms:sign"))} />}
       {module === "staffing" && <StaffingModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module !== "staffing" && TRACKERS[module] && <TrackerModule facility={facility} moduleKey={module} data={data} update={update} />}
