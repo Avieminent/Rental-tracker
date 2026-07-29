@@ -544,6 +544,14 @@ const STATUS_LIST = Object.keys(STATUS);
 const HOSP = ["Hospitalization"];
 const TERMINAL = ["Discharged","Deceased"];
 const IN_FACILITY = ["Active","Admitting","Room Move","COVID+","Iso"];
+
+// --- Same-room gender protocol ---
+// Rooms are recognized from bed names: "101-A" and "101-B" (same wing) are one room.
+// A trailing letter (with optional dash/space) is the bed; the rest is the room number.
+const roomKeyOf = (wing, room) => (wing || "") + "||" + String(room || "").trim().replace(/[\s-][A-Za-z0-9]$/, "").replace(/([0-9])[A-Za-z]$/, "$1");
+// Whose gender "dictates" the room: current residents, plus hospitalized ones coming back
+// (bedhold or reserved). Departed residents dictate nothing.
+const genderDictates = (r) => !!(r && r.name && !r._left && (IN_FACILITY.includes(r.status) || (r.status === "Hospitalization" && (r.hosp?.bedhold === "Y" || r.hosp?.expectedReturn === "Y"))));
 const holdsBed = (r) => IN_FACILITY.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold==="Y");
 // blocksBed: the bed cannot be given to a new resident. Everything that holds a bed blocks it,
 // plus "no bedhold but expected to return" — vacant for census/billing, but reserved until resolved.
@@ -1494,7 +1502,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         }} />}
       {shuffleFor && <ShuffleModal
         seedId={shuffleFor}
-        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, occupied:blocksBed(r) }))}
+        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, mf:r.mf, dictates:genderDictates(r), occupied:blocksBed(r) }))}
         onCancel={()=>setShuffleFor(null)}
         onApply={applyShuffle} />}
       {pendingImport && (
@@ -1512,7 +1520,13 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           </div>
         </Overlay>
       )}
-      {adding && <AddModal openBeds={(viewing?displayRes:res).filter(r=>!blocksBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} backfillDate={viewing?viewDate:null} onCancel={()=>setAdding(false)}
+      {adding && <AddModal genderConflict={(bedId, mf) => {
+        const board = (viewing?displayRes:res);
+        const me = board.find(r=>r.id===bedId); if (!me) return null;
+        const key = roomKeyOf(me.wing, me.room);
+        const hit = board.find(r => r.id!==bedId && !r._left && roomKeyOf(r.wing, r.room)===key && genderDictates(r) && r.mf && r.mf!==mf);
+        return hit ? { name: hit.name, mf: hit.mf, room: me.room } : null;
+      }} openBeds={(viewing?displayRes:res).filter(r=>!blocksBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} backfillDate={viewing?viewDate:null} onCancel={()=>setAdding(false)}
         onAdd={(d)=>{
           if (viewing) {
             // Backfill: add to the viewed day and every day forward + live board.
@@ -1720,11 +1734,13 @@ function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCa
   );
 }
 
-function AddModal({ openBeds, backfillDate, onAdd, onCancel }){
+function AddModal({ openBeds, backfillDate, genderConflict, onAdd, onCancel }){
   // openBeds: [{ id, wing, room }] — beds with no current resident. Adding fills one of these.
   const [f,setF]=useState({ bedId: openBeds[0]?.id || "", name:"", payer:"", mf:"", vent:false });
-  const set=(k,v)=>setF(s=>({...s,[k]:v}));
+  const [ack,setAck]=useState(false);
+  const set=(k,v)=>{ setF(s=>({...s,[k]:v})); if (k==="bedId"||k==="mf") setAck(false); };
   const noBeds = openBeds.length === 0;
+  const conflict = (!noBeds && f.bedId && f.mf && genderConflict) ? genderConflict(f.bedId, f.mf) : null;
   return (
     <Overlay>
       <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom: backfillDate?4:12 }}>{backfillDate ? "Add resident (backfill)" : "Add resident"}</div>
@@ -1747,9 +1763,18 @@ function AddModal({ openBeds, backfillDate, onAdd, onCancel }){
           <div style={{height:16}} />
         </>
       )}
-      <div className="flex justify-end gap-2">
+      {conflict && (
+            <div style={{ background:"#fdf4dd", border:"1px solid #d9c489", borderRadius:8, padding:"10px 12px", marginBottom:12, fontSize:13, color:BRAND.ink }}>
+              <b>Mixed-gender room.</b> Room {conflict.room} already has a {conflict.mf==="M"?"male":"female"} resident ({conflict.name}) — this is normally against protocol.
+              <label style={{ display:"flex", alignItems:"center", gap:8, marginTop:8, fontSize:13 }}>
+                <input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)} />
+                This placement was approved — proceed anyway
+              </label>
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-        <button disabled={noBeds || !f.name || !f.bedId || !f.payer || !f.mf} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!noBeds && f.name && f.bedId && f.payer && f.mf)?BRAND.ink:"#aaa" }}>Add</button>
+        <button disabled={noBeds || !f.name || !f.bedId || !f.payer || !f.mf || (conflict && !ack)} onClick={()=>onAdd(f)} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:(!noBeds && f.name && f.bedId && f.payer && f.mf)?BRAND.ink:"#aaa" }}>Add</button>
       </div>
     </Overlay>
   );
@@ -1922,7 +1947,29 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
   rows.forEach(r => {
     if (r.toId) { const d = bed(r.toId); if (d && d.occupied && !rows.some(x => x.fromId === r.toId)) problems.push(`${d.name || d.room} was bumped and still needs a room.`); }
   });
-  const ok = !incomplete && problems.length === 0;
+  // Post-move gender check: simulate where everyone lands, then flag mixed rooms a move creates.
+  const [gAck, setGAck] = useState(false);
+  const genderConflicts = (() => {
+    if (incomplete) return [];
+    const moveByDest = {}; rows.forEach(r => { if (r.fromId && r.toId) moveByDest[r.toId] = r.fromId; });
+    const origins = new Set(rows.map(r => r.fromId).filter(Boolean));
+    const after = beds.map(b => {
+      if (moveByDest[b.id]) { const src = bed(moveByDest[b.id]); return { ...b, name: src?.name, mf: src?.mf, dictates: true, movedIn: true }; }
+      if (origins.has(b.id)) return { ...b, name: "", mf: "", dictates: false, movedIn: false };
+      return { ...b, movedIn: false };
+    });
+    const byRoom = {};
+    after.forEach(b => { const k = roomKeyOf(b.wing, b.room); (byRoom[k] = byRoom[k] || []).push(b); });
+    const out = [];
+    Object.values(byRoom).forEach(list => {
+      const occ = list.filter(b => b.dictates && b.mf);
+      const ms = occ.filter(b => b.mf === "M"), fs = occ.filter(b => b.mf === "F");
+      if (ms.length && fs.length && occ.some(b => b.movedIn))
+        out.push(`Room ${list[0].room.replace(/[\s-]?[A-Za-z]$/,"")}: ${ms.map(b=>b.name).join(", ")} (M) with ${fs.map(b=>b.name).join(", ")} (F)`);
+    });
+    return out;
+  })();
+  const ok = !incomplete && problems.length === 0 && (genderConflicts.length === 0 || gAck);
 
   const moverOptions = beds.filter(b => b.occupied);
   return (
@@ -1966,6 +2013,16 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
       )}
       <div style={{ marginTop:12, fontSize:12, color:BRAND.inkSoft }}>{rows.filter(r=>r.fromId&&r.toId).length} move(s) planned</div>
       <div style={{height:14}} />
+      {genderConflicts.length > 0 && (
+        <div style={{ background:"#fdf4dd", border:"1px solid #d9c489", borderRadius:8, padding:"10px 12px", marginBottom:12, fontSize:13, color:BRAND.ink }}>
+          <b>Mixed-gender room{genderConflicts.length>1?"s":""} after this shuffle</b> — normally against protocol:
+          <ul style={{ margin:"6px 0 0", paddingLeft:18 }}>{genderConflicts.map((c,i)=><li key={i}>{c}</li>)}</ul>
+          <label style={{ display:"flex", alignItems:"center", gap:8, marginTop:8 }}>
+            <input type="checkbox" checked={gAck} onChange={e=>setGAck(e.target.checked)} />
+            Approved — apply anyway
+          </label>
+        </div>
+      )}
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
         <button disabled={!ok} onClick={()=>onApply(rows.filter(r=>r.fromId&&r.toId).map(r=>({ fromId:r.fromId, toId:r.toId })))} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: ok?BRAND.ink:"#aaa" }}>Apply moves</button>
