@@ -1201,8 +1201,9 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const migNote = bedboardStore.migrationNote ? bedboardStore.migrationNote[facility] : null;
   const inHospital = displayRes.filter(r => r.status==="Hospitalization");
   const _left = bedboardStore.getLeft(facility);
-  const discharges = _left.filter(p => p.leftReason==="Discharged").slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftLogged===todayISO() && p.leftDate!==p.leftLogged, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
-  const deaths     = _left.filter(p => p.leftReason==="Deceased").slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftLogged===todayISO() && p.leftDate!==p.leftLogged, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
+  // Today's activity only: discharges LOGGED today (including ones backfilled to an earlier date — shown amber)
+  const discharges = _left.filter(p => p.leftReason==="Discharged" && p.leftLogged===todayISO()).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftDate!==p.leftLogged, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
+  const deaths     = _left.filter(p => p.leftReason==="Deceased" && p.leftLogged===todayISO()).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftDate!==p.leftLogged, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
@@ -1381,20 +1382,6 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         </div>
       </div>
 
-      {eventWarn && <Overlay>
-        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
-        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
-          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
-        </div>
-        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
-          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
-        </ul>
-        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:14 }}>Proceeding removes them from the board from {eventWarn.date} forward. Their RFMS and Rentals records are kept.</div>
-        <div className="flex justify-end gap-2">
-          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-          <button onClick={eventWarn.run} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK — proceed</button>
-        </div>
-      </Overlay>}
       {availFor && <AvailModal
         resident={res.find(r=>r.id===availFor)}
         isAdmin={isAdmin}
@@ -1428,6 +1415,20 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           }
           runEvent();
         }} />}
+      {eventWarn && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
+          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
+        </div>
+        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
+          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
+        </ul>
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:14 }}>Proceeding removes them from the board from {eventWarn.date} forward. Their RFMS and Rentals records are kept.</div>
+        <div className="flex justify-end gap-2">
+          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button onClick={eventWarn.run} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK — proceed</button>
+        </div>
+      </Overlay>}
       {editFor && <EditResidentModal
         resident={(viewing?displayRes:res).find(r=>r.id===editFor)}
         viewDate={viewing?viewDate:null}
@@ -2130,7 +2131,14 @@ function RehospModule({ facility }) {
         <div style={{ height:12 }} />
         <div className="flex justify-end gap-2">
           <button onClick={()=>setReturnPrompt(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
-          <button disabled={!returnPrompt.date} onClick={()=>{ applyStatus(returnPrompt.id, returnPrompt.status, null, returnPrompt.date); setReturnPrompt(null); }}
+          <button disabled={!returnPrompt.date} onClick={()=>{
+            const row = res.find(r=>r.id===returnPrompt.id);
+            applyStatus(returnPrompt.id, returnPrompt.status, null, returnPrompt.date);
+            // Late-logged return: stamp the in-between days too, so the census on those
+            // days counts them as back in the building from the actual return date.
+            if (returnPrompt.date < todayISO())
+              bedboardStore.backdateStatusDays(facility.name, returnPrompt.id, returnPrompt.date, { status: returnPrompt.status, hosp: { ...(row?.hosp||{}), returned: returnPrompt.date } });
+            setReturnPrompt(null); }}
             className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Confirm</button>
         </div>
       </Overlay>}
