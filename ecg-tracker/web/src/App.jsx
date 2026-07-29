@@ -3201,7 +3201,7 @@ function Facility({ facility, module, setModule, data, update, role, allowedPage
       {module === "budget" && <DeptBudgetModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} isAdmin={role === "admin"} />}
       {module === "rehosp" && <RehospModule key={facility.id} facility={facility} />}
-      {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || role === "corporate"} />}
+      {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || (Array.isArray(auth.user.pages) && auth.user.pages.includes("rfms:sign"))} />}
       {module === "staffing" && <StaffingModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module !== "staffing" && TRACKERS[module] && <TrackerModule facility={facility} moduleKey={module} data={data} update={update} />}
     </div>
@@ -3797,7 +3797,7 @@ function UserManager({ facilities, meId, onClose }) {
   const add = async () => {
     setErr(""); setBusy(true);
     try {
-      const u = await api("/api/users", "POST", { email: form.email.trim(), role: form.role, facilityId: form.role === "facility" ? form.facilityId : null, pages: form.role === "facility" ? form.pages : null, password: form.password });
+      const u = await api("/api/users", "POST", { email: form.email.trim(), role: form.role, facilityId: form.role === "facility" ? form.facilityId : null, pages: form.role !== "admin" ? form.pages : null, password: form.password });
       setUsers((l) => [u, ...(l || [])]); setCreated({ email: u.email, password: form.password });
       setForm({ email: "", role: "facility", facilityId: facilities[0]?.id || "", password: genPw(), pages: MODULES.map((m) => m.key) });
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
@@ -3824,6 +3824,14 @@ function UserManager({ facilities, meId, onClose }) {
         {form.role === "facility" && (
           <label className="block mb-2"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Facility</span>
             <select style={inpStyle} value={form.facilityId} onChange={(e) => set("facilityId", e.target.value)}>{facilities.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>
+        )}
+        {(form.role === "facility" || form.role === "corporate") && (
+          <div className="mb-3">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={form.pages.includes("rfms:sign")} onChange={() => set("pages", togglePage(form.pages, "rfms:sign"))} />
+              Can sign RFMS spend-downs (building administrator)
+            </label>
+          </div>
         )}
         {form.role === "facility" && (
           <div className="mb-3">
@@ -3859,16 +3867,20 @@ function UserManager({ facilities, meId, onClose }) {
                   <button onClick={() => { setResetId(null); setResetPw(""); }} className="text-xs" style={{ color: BRAND.inkSoft }}>Cancel</button></div>
               ) : (
                 <div className="flex items-center gap-1 shrink-0">
-                  {u.role === "facility" && <button onClick={() => { setPagesId(u.id); setPagesSel(Array.isArray(u.pages) ? u.pages : MODULES.map((m) => m.key)); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: BRAND.inkSoft }}><Building2 size={14} /> Pages</button>}
+                  {(u.role === "facility" || u.role === "corporate") && <button onClick={() => { setPagesId(u.id); setPagesSel(Array.isArray(u.pages) ? u.pages : MODULES.map((m) => m.key)); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: BRAND.inkSoft }}><Building2 size={14} /> Pages</button>}
                   <button onClick={() => { setResetId(u.id); setResetPw(genPw()); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: BRAND.inkSoft }}><KeyRound size={14} /> Reset</button>
                   {u.id !== meId && <button onClick={() => remove(u.id)} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: TONE.bad.fg }}><Trash2 size={14} /> Remove</button>}
                 </div>
               )}
               {pagesId === u.id && (
                 <div className="w-full basis-full mt-2 rounded-lg px-3 py-3" style={{ background: BRAND.paper, border: `1px solid ${BRAND.line}` }}>
-                  <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: BRAND.inkSoft }}>Pages {u.email} can open</div>
+                  <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: BRAND.inkSoft }}>Permissions for {u.email}</div>
+                  <label className="inline-flex items-center gap-2 text-xs mb-3" style={{ display:"flex" }}>
+                    <input type="checkbox" checked={pagesSel.includes("rfms:sign")} onChange={() => setPagesSel((a) => togglePage(a, "rfms:sign"))} />
+                    Can sign RFMS spend-downs (building administrator)
+                  </label>
                   <div className="flex flex-wrap gap-2 mb-3">
-                    {PAGE_OPTS.map((p) => (
+                    {u.role === "facility" && PAGE_OPTS.map((p) => (
                       <label key={p.key} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs" style={{ border: `1px solid ${BRAND.line}`, cursor: "pointer", background: pagesSel.includes(p.key) ? BRAND.lineSoft : "#fff" }}>
                         <input type="checkbox" checked={pagesSel.includes(p.key)} onChange={() => setPagesSel((a) => togglePage(a, p.key))} />
                         {p.label}
