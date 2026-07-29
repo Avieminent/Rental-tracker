@@ -638,7 +638,7 @@ const bedboardStore = {
     const leftDate = (detail && detail.date) || todayISO();
     ppl[p.id] = { ...p,
       room: bed.room, wing: bed.wing,
-      status: reason, leftReason: reason, leftDate, leftDetail: detail || {}, leftStatus: reason, bedIdAtExit: bedId,
+      status: reason, leftReason: reason, leftDate, leftLogged: todayISO(), leftDetail: detail || {}, leftStatus: reason, bedIdAtExit: bedId,
       disc: reason === "Discharged" ? (detail || {}) : (p.disc || {}),
       death: reason === "Deceased" ? (detail || {}) : (p.death || {}),
       hosp: reason === "Hospitalization" ? (detail || {}) : (p.hosp || {}),
@@ -1201,8 +1201,8 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const migNote = bedboardStore.migrationNote ? bedboardStore.migrationNote[facility] : null;
   const inHospital = displayRes.filter(r => r.status==="Hospitalization");
   const _left = bedboardStore.getLeft(facility);
-  const discharges = _left.filter(p => p.leftReason==="Discharged").slice().reverse().map(p => ({ name:p.name, room:p.room, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
-  const deaths     = _left.filter(p => p.leftReason==="Deceased").slice().reverse().map(p => ({ name:p.name, room:p.room, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
+  const discharges = _left.filter(p => p.leftReason==="Discharged").slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftLogged===todayISO() && p.leftDate!==p.leftLogged, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
+  const deaths     = _left.filter(p => p.leftReason==="Deceased").slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftLogged===todayISO() && p.leftDate!==p.leftLogged, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
@@ -1374,9 +1374,9 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             <Section title="In hospital" cols={["Name","Room","Bedhold","Date","Reason"]}
               rows={inHospital.map(r=>[r.name, r.room, r.hosp.bedhold||"", r.hosp.date||"", r.hosp.reason||""])} empty="none" />
             <Section title="Discharges" cols={["Name","Room","Date","Discharged to"]}
-              rows={discharges.map(r=>[r.name, r.room, r.disc.date||"", r.disc.dischargedTo||""])} empty="none" />
+              rows={discharges.map(r=>({ cells:[r.name, r.room, r.disc.date||"", r.disc.dischargedTo||""], hl: r.hl }))} empty="none" />
             <Section title="Deaths" cols={["Name","Room","Date","Cause"]}
-              rows={deaths.map(r=>[r.name, r.room, r.death.date||"", r.death.cause||""])} empty="none" />
+              rows={deaths.map(r=>({ cells:[r.name, r.room, r.death.date||"", r.death.cause||""], hl: r.hl }))} empty="none" />
           </div>
         </div>
       </div>
@@ -1569,7 +1569,7 @@ function Section({ title, cols, rows, empty="none" }){
         {rows.length ? (
           <table style={{ width:"100%", fontSize:12, borderCollapse:"collapse" }}>
             <thead><tr style={{ color:BRAND.inkSoft, textAlign:"left" }}>{cols.map(c=><th key={c} className="px-1 py-1 font-medium" style={{whiteSpace:"nowrap"}}>{c}</th>)}</tr></thead>
-            <tbody>{rows.map((r,i)=>(<tr key={i} style={{ borderTop:`1px solid ${BRAND.lineSoft}` }}>{r.map((v,j)=><td key={j} className="px-1 py-1" style={{whiteSpace:"nowrap"}}>{v||""}</td>)}</tr>))}</tbody>
+            <tbody>{rows.map((r,i)=>{ const cells = Array.isArray(r) ? r : r.cells; const hl = !Array.isArray(r) && r.hl; return (<tr key={i} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background: hl ? "#fdf4dd" : "transparent" }} title={hl ? "Backfilled today" : ""}>{cells.map((v,j)=><td key={j} className="px-1 py-1" style={{whiteSpace:"nowrap"}}>{v||""}</td>)}</tr>);})}</tbody>
           </table>
         ) : <span style={{ fontSize:12, color:BRAND.inkSoft }}>{empty}</span>}
       </div>
@@ -1744,8 +1744,8 @@ function PayerChanges({ res, facility }){
   const todaysChanges = changes.filter(c => (c.loggedDate || c.date) === _today);
   todaysChanges.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
   const exportChanges = () => {
-    const out = [["Effective date","Logged on","Type","Resident","Room","From","To"]];
-    changes.forEach(c => out.push([c.date, c.loggedDate||c.date, c.kind==="vent"?"Vent":c.kind==="status"?"Status":"Payer", c.name, c.room, (c.kind==="vent"||c.kind==="status")?c.from:payerName(c.from), (c.kind==="vent"||c.kind==="status")?c.to:payerName(c.to)]));
+    const out = [["Effective date","Logged on","Backfilled","Type","Resident","Room","From","To"]];
+    changes.forEach(c => out.push([c.date, c.loggedDate||c.date, (c.loggedDate && c.date!==c.loggedDate)?"Yes":"", c.kind==="vent"?"Vent":c.kind==="status"?"Status":"Payer", c.name, c.room, (c.kind==="vent"||c.kind==="status")?c.from:payerName(c.from), (c.kind==="vent"||c.kind==="status")?c.to:payerName(c.to)]));
     downloadCSV(`Payer_changes_${facility.replace(/\s+/g,"_")}_${todayISO()}.csv`, out);
   };
   return (
@@ -1758,7 +1758,7 @@ function PayerChanges({ res, facility }){
         {todaysChanges.length===0 ? (
           <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>No changes logged today yet. When you change a resident's payer, it's logged here with its effective date.</div>
         ) : todaysChanges.map((c,i)=>(
-          <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none" }}>
+          <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none", background: (c.loggedDate && c.date!==c.loggedDate) ? "#fdf4dd" : "transparent" }}>
             <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
             <div style={{ fontSize:12, color:BRAND.inkSoft }}>
               {c.kind==="vent" ? <>Vent: {c.from} → {c.to}</> : c.kind==="status" ? <>Status: {c.from} → {c.to}</> : <>{payerName(c.from)} → {payerName(c.to)}</>} · {c.date}
