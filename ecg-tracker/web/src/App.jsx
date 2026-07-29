@@ -566,6 +566,7 @@ const bedboardStore = {
   facilityId: {},
   saveTimer: {},
   baseline: {},
+  pendingV1: {},     // facilityName -> true while the upgrade awaits an admin's approval (saves blocked)
   migrationNote: {}, // facilityName -> one-time conversion report (shown to admins)
   listeners: new Set(),
 
@@ -772,7 +773,8 @@ const bedboardStore = {
         this.beds[f.name] = Array.isArray(d.beds) ? d.beds : [];
         this.history[f.name] = d.history || {};
       } else {
-        this._convertV1(f.name, d); // in-memory; commits (with backup) on first save
+        this._convertV1(f.name, d); // in-memory so the app can display; NOTHING saves until an admin approves
+        this.pendingV1[f.name] = true;
       }
       this._setBaseline(f.name, this._snapPayload(f.name));
     });
@@ -870,6 +872,7 @@ const bedboardStore = {
   },
 
   persist(fac) {
+    if (this.pendingV1[fac]) return; // upgrade not approved yet — nothing is written to the database
     clearTimeout(this.saveTimer[fac]);
     this.saveTimer[fac] = setTimeout(async () => {
       const fid = this.facilityId[fac];
@@ -899,6 +902,12 @@ const bedboardStore = {
         this._setBaseline(fac, payload);
       } catch { onErr(); }
     }, 800);
+  },
+  // Admin pressed "Convert now": open the gate and commit (backup runs first inside persist).
+  approveConversion(fac) {
+    delete this.pendingV1[fac];
+    this.listeners.forEach(l => l());
+    this.persist(fac);
   },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
@@ -1155,7 +1164,23 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           ))}
         </div>
 
-        {migNote && isAdmin && (
+        {migNote && bedboardStore.pendingV1 && bedboardStore.pendingV1[facility] && (
+        <div className="rounded-lg px-4 py-3 mb-3" style={{ background:"#fdf4dd", border:"1px solid #d9c489", fontSize:13, lineHeight:1.6 }}>
+          <b>⚠️ Upgrade ready — needs approval before anything saves.</b><br/>
+          This facility's board is ready to convert to the new resident-ID system:
+          <b> {migNote.converted}</b> current residents, <b>{migNote.keptLeft}</b> discharged/deceased kept,
+          <b> {migNote.recovered}</b> recovered from history, {migNote.days} days of history preserved.
+          Until it's approved, <b>changes made here are NOT saved</b>. A backup of the old format is stored automatically before the first save.
+          {isAdmin ? (
+            <div style={{ marginTop:8 }}>
+              <button onClick={()=>{ bedboardStore.approveConversion(facility); toast("Converted. Backup stored; changes now save normally."); }} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Convert now</button>
+            </div>
+          ) : (
+            <div style={{ marginTop:6, color:BRAND.inkSoft }}>Ask an administrator to open this page and press Convert.</div>
+          )}
+        </div>
+      )}
+      {migNote && !(bedboardStore.pendingV1 && bedboardStore.pendingV1[facility]) && isAdmin && (
         <div className="rounded-lg px-4 py-2.5 mb-3" style={{ background:"#eef4ec", border:"1px solid #b7ccb2", fontSize:13 }}>
           ✅ This facility was upgraded to the new resident-ID system: <b>{migNote.converted}</b> current residents converted,
           <b> {migNote.keptLeft}</b> discharged/deceased kept, <b>{migNote.recovered}</b> recovered from history, {migNote.days} days of history preserved.
