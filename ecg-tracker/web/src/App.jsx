@@ -674,6 +674,18 @@ const bedboardStore = {
     this.persist(fac);
   },
 
+  // Append a change-log entry (payer or vent) to the person on a bed.
+  // date = when the change is effective; loggedDate = when it was recorded.
+  logChange(fac, bedId, entry) {
+    const bed = (this.beds[fac] || []).find(b => b.id === bedId);
+    const ppl = this.people[fac] || {};
+    const p = bed && bed.residentId ? ppl[bed.residentId] : null;
+    if (!p) return;
+    ppl[p.id] = { ...p, payerLog: [...(p.payerLog || []), entry] };
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
+
   // ---- Later-activity scan for the backdate warning (by resident id, name fallback for old days). ----
   laterActivity(fac, bedId, fromISO) {
     // Person-based: find WHO is on this bed now, then scan every history row that belongs
@@ -794,8 +806,24 @@ const bedboardStore = {
       if (r.name) {
         const pid = "res_" + uid();
         const person = { ...r }; delete person.id;
-        ppl[pid] = { ...person, id: pid };
-        bed.residentId = pid; converted++;
+        if (TERMINAL.includes(r.status)) {
+          // LEGACY: a discharged/deceased resident still written on the bed row (pre-upgrade design).
+          // They must NOT occupy the bed — convert them like a left-list person so the bed is safely
+          // empty and their record (funds, history) is protected from being overwritten by a new admit.
+          const detail = r.status === "Deceased" ? (r.death || {}) : (r.disc || {});
+          ppl[pid] = { ...person, id: pid, leftReason: r.status, leftStatus: r.status,
+            leftDate: detail.date || todayISO(), leftDetail: detail, bedIdAtExit: r.id };
+          keptLeft++;
+        } else if (r.status === "Hospitalization" && r.hosp && r.hosp.bedhold !== "Y" && !r.hosp.expectedReturn) {
+          // LEGACY: hospitalized with no bedhold recorded before "expected to return" existed.
+          // Safest: keep them, mark expected-return Yes (bed reserved, not billed, not fillable)
+          // so a new admit can't overwrite them; staff resolve their real state later.
+          ppl[pid] = { ...person, id: pid, hosp: { ...r.hosp, expectedReturn: "Y" } };
+          bed.residentId = pid; converted++;
+        } else {
+          ppl[pid] = { ...person, id: pid };
+          bed.residentId = pid; converted++;
+        }
       }
       beds.push(bed);
     });
@@ -879,10 +907,25 @@ const bedboardStore = {
       if (!fid) return;
       let payload = this._snapPayload(fac);
       try {
+        // Committing a conversion? If another admin already converted this facility, ADOPT their
+        // version instead of saving ours — two independent conversions must never both commit
+        // (they would create duplicate resident records).
+        if (this._needsBackup && this._needsBackup[fac] && this.recordId[fac]) {
+          try {
+            const remote = await api(`/api/records/${this.recordId[fac]}`);
+            if (remote && remote.data && remote.data.v === 2 && remote.data.people) {
+              this.people[fac] = remote.data.people; this.beds[fac] = remote.data.beds || []; this.history[fac] = remote.data.history || {};
+              delete this._needsBackup[fac];
+              this._setBaseline(fac, this._snapPayload(fac));
+              this.listeners.forEach(l => l());
+              return; // theirs is now ours; nothing to save
+            }
+          } catch { /* can't check — proceed with normal backup path */ }
+        }
         // One-time safety backup of the pre-upgrade board, before the first v2 save.
         if (this._needsBackup && this._needsBackup[fac]) {
           try { await createRecord("census", "board-v1-backup", fid, this._needsBackup[fac]); delete this._needsBackup[fac]; }
-          catch { /* backup failed — do NOT save v2 over v1 without a backup */ return; }
+          catch { onErr(); return; /* backup failed — surface it; NEVER save v2 over v1 without a backup */ }
         }
         if (this.recordId[fac]) {
           try {
@@ -980,9 +1023,19 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const [availFor, setAvailFor] = useState(null); // bed id pending the "make Available" flow
   const [eventWarn, setEventWarn] = useState(null); // backdated-event warning (later activity exists)
   const setStatus = (id, status) => {
+    const row = res.find(r => r.id === id);
+    // A resident out at hospital with a reserved (unbilled) bed: their status is managed
+    // on the Rehospitalization page only.
+    if (row && row.status === "Hospitalization" && row.hosp?.bedhold !== "Y" && row.hosp?.expectedReturn === "Y") {
+      toast("This resident's bed is reserved while they're out — change their status from the Rehosp page.");
+      return;
+    }
+    if (status === "Blocked" && row && row.name) {
+      toast("Blocked is only for empty rooms. Move or discharge the resident first.");
+      return;
+    }
     if (status === "Room Move") { setShuffleFor(id); return; }
     if (status === "Available") {
-      const row = res.find(r => r.id === id);
       if (!row || !row.name) return; // already empty — nothing to do
       setAvailFor(id); return;
     }
@@ -1234,7 +1287,12 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                             </select>
                           </td>
                           <td className="px-2 py-1.5 text-center">
-                            <input type="checkbox" disabled={viewing} checked={r.vent} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,vent:e.target.checked}:x))} />
+                            <select disabled={viewing || r._left} value={r.vent?"Y":"N"} onChange={e=>{
+                              const nv = e.target.value==="Y";
+                              setRes(rs=>rs.map(x=>x.id===r.id?{...x, vent:nv, payerLog:[...(x.payerLog||[]), { kind:"vent", date:todayISO(), loggedDate:todayISO(), from:x.vent?"Yes":"No", to:nv?"Yes":"No" }]}:x));
+                            }} style={{ fontSize:12, padding:"2px 3px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
+                              <option value="N">No</option><option value="Y">Yes</option>
+                            </select>
                           </td>
                           <td className="px-1 py-1">
                             <select disabled={viewing || r._left} value={r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
@@ -1292,7 +1350,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         onDischarge={()=>{ setModal({ id: availFor, status: "Discharged" }); setAvailFor(null); }}
         onDeath={()=>{ setModal({ id: availFor, status: "Deceased" }); setAvailFor(null); }}
         onAdminFree={()=>{ bedboardStore.moveToLeft(facility, availFor, "Discharged", { date: todayISO(), dischargedTo: "", note: "Bed marked available by admin" }); toast("Bed freed. Resident kept in RFMS and Rentals."); setAvailFor(null); }} />}
-      {modal && <EventModal spec={modal} resident={res.find(r=>r.id===modal.id)}
+      {modal && <EventModal spec={modal} resident={(viewing?displayRes:res).find(r=>r.id===modal.id)} defaultDate={viewing?viewDate:undefined}
         onCancel={()=>setModal(null)}
         onConfirm={(detail)=>{
           const isTerminal = TERMINAL.includes(modal.status);
@@ -1316,16 +1374,30 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         onCancel={()=>setEditFor(null)}
         onSave={(d)=>{
           if (viewing) {
+            // Event statuses (hospitalization/discharge/death) open the full event popup,
+            // pre-dated to the viewed day, and run the real event flow with its warnings.
+            if (d._statusChanged && ["Hospitalization","Discharged","Deceased"].includes(d.status)) {
+              setModal({ id: editFor, status: d.status });
+              setEditFor(null);
+              return;
+            }
             // Past-date correction: apply each changed field from viewDate forward (stopping at next change).
-            if (d._ventChanged)   bedboardStore.editFieldForward(facility, editFor, "vent",   d.vent,   viewDate);
-            if (d._payerFwd)      bedboardStore.editFieldForward(facility, editFor, "payer",  d.payer,  viewDate);
+            if (d._ventChanged) {
+              bedboardStore.editFieldForward(facility, editFor, "vent", d.vent, viewDate);
+              bedboardStore.logChange(facility, editFor, { kind:"vent", date: viewDate, loggedDate: todayISO(), from: d.vent ? "No" : "Yes", to: d.vent ? "Yes" : "No" });
+            }
+            if (d._payerFwd) {
+              bedboardStore.editFieldForward(facility, editFor, "payer", d.payer, viewDate);
+              bedboardStore.logChange(facility, editFor, { kind:"payer", date: viewDate, loggedDate: todayISO(), from: d._prevPayer, to: d.payer });
+            }
             if (d._statusChanged) bedboardStore.editFieldForward(facility, editFor, "status", d.status, viewDate);
             toast("Record corrected from " + viewDate + " forward.");
           } else {
             setRes(rs=>rs.map(r=> {
               if (r.id!==editFor) return r;
               const next = { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer };
-              if (d._payerChanged) next.payerLog = [...(r.payerLog||[]), { date:d._effDate, from:d._prevPayer, to:d.payer }];
+              if (d._payerChanged) next.payerLog = [...(next.payerLog||r.payerLog||[]), { kind:"payer", date:d._effDate, loggedDate:todayISO(), from:d._prevPayer, to:d.payer }];
+              if (d.vent !== r.vent) next.payerLog = [...(next.payerLog||r.payerLog||[]), { kind:"vent", date:todayISO(), loggedDate:todayISO(), from:r.vent?"Yes":"No", to:d.vent?"Yes":"No" }];
               return next;
             }));
           }
@@ -1440,11 +1512,11 @@ function Section({ title, cols, rows, empty="none" }){
   );
 }
 
-function EventModal({ spec, resident, onConfirm, onCancel }){
+function EventModal({ spec, resident, onConfirm, onCancel, defaultDate }){
   const isHosp = spec.status==="Hospitalization";
   const isDisc = spec.status==="Discharged";
   const isDeath= spec.status==="Deceased";
-  const [date,setDate]=useState(todayISO());
+  const [date,setDate]=useState(defaultDate || todayISO());
   const [time,setTime]=useState(nowHM());
   const [extra,setExtra]=useState({ reason:"", sentBy:"", bedhold:"N", expectedReturn:"Y", dischargedTo:"", cause:"", doctor:"", ama:"N", notes:"" });
   const set=(k,v)=>setExtra(s=>({...s,[k]:v}));
@@ -1481,7 +1553,7 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
             <option value="N">No</option>
           </select>
           <span style={{ fontSize:12, color:BRAND.inkSoft }}>
-            {extra.expectedReturn==="Y" ? "bed reserved (not billed) until they return" : "treated as a discharge"}
+            {extra.expectedReturn==="Y" ? "bed reserved (not billed) until they return — status can then only be changed from the Rehosp page" : "treated as a discharge"}
           </span>
         </div>
       )}
@@ -1578,7 +1650,7 @@ function AddModal({ openBeds, backfillDate, onAdd, onCancel }){
           <div style={{height:12}} />
           <div style={{ display:"flex", gap:12 }}>
             <div style={{ flex:1 }}><L label="M/F *"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
-            <div style={{ flex:1 }}><L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L></div>
+            <div style={{ flex:1 }}><L label="Vent"><select value={f.vent?"Y":"N"} onChange={e=>set("vent",e.target.value==="Y")} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}><option value="N">No</option><option value="Y">Yes</option></select></L></div>
           </div>
           <div style={{height:12}} />
           <L label="Payer *"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
@@ -1598,11 +1670,14 @@ function PayerChanges({ res, facility }){
   const payerName=(c)=>{ const hit=PAYERS.find(([n,code])=>code===c); return hit?hit[0]:(c||"—"); };
   // Flatten every resident's payerLog into one dated list, newest first.
   const changes = [];
-  res.forEach(r => (r.payerLog||[]).forEach(h => changes.push({ name:r.name, room:r.room, date:h.date, from:h.from, to:h.to })));
-  changes.sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+  const pushLog = (who) => (h) => changes.push({ name:who.name, room:who.room, kind:h.kind||"payer", date:h.date, loggedDate:h.loggedDate, from:h.from, to:h.to });
+  res.forEach(r => (r.payerLog||[]).forEach(pushLog(r)));
+  // departed residents' change history stays visible too
+  bedboardStore.getLeft(facility).forEach(p => (p.payerLog||[]).forEach(pushLog(p)));
+  changes.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
   const exportChanges = () => {
-    const out = [["Date","Resident","Room","From","To"]];
-    changes.forEach(c => out.push([c.date, c.name, c.room, payerName(c.from), payerName(c.to)]));
+    const out = [["Effective date","Logged on","Type","Resident","Room","From","To"]];
+    changes.forEach(c => out.push([c.date, c.loggedDate||c.date, c.kind==="vent"?"Vent":"Payer", c.name, c.room, c.kind==="vent"?c.from:payerName(c.from), c.kind==="vent"?c.to:payerName(c.to)]));
     downloadCSV(`Payer_changes_${facility.replace(/\s+/g,"_")}_${todayISO()}.csv`, out);
   };
   return (
@@ -1617,7 +1692,10 @@ function PayerChanges({ res, facility }){
         ) : changes.map((c,i)=>(
           <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none" }}>
             <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
-            <div style={{ fontSize:12, color:BRAND.inkSoft }}>{payerName(c.from)} → {payerName(c.to)} · {c.date}</div>
+            <div style={{ fontSize:12, color:BRAND.inkSoft }}>
+              {c.kind==="vent" ? <>Vent: {c.from} → {c.to}</> : <>{payerName(c.from)} → {payerName(c.to)}</>} · {c.date}
+              {c.loggedDate && c.loggedDate!==c.date ? <span style={{ color:"#8a6d3f" }}> (logged {c.loggedDate})</span> : null}
+            </div>
           </div>
         ))}
       </div>
@@ -1627,8 +1705,10 @@ function PayerChanges({ res, facility }){
 
 function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSave }){
   const past = !!viewDate;
-  const EVENT_STATUSES = ["Hospitalization","Discharged","Deceased","Available","Room Move"];
-  const STATUS_OPTS = ((typeof STATUS!=="undefined") ? Object.keys(STATUS) : ["Active","Admitting","Iso","COVID+"]).filter(k => !EVENT_STATUSES.includes(k));
+  const EVENT_STATUSES = ["Hospitalization","Discharged","Deceased"];
+  // Past-date corrections offer exactly these; the three event statuses open the full
+  // event popup (dated to the viewed day) so they run the real discharge/death/hosp flow.
+  const STATUS_OPTS = ["COVID+","Iso","Hospitalization","Discharged","Deceased"];
   const [f,setF]=useState({ name:resident?.name||"", mf:resident?.mf||"", vent:!!resident?.vent, payer:resident?.payer||"", status:resident?.status||"Active" });
   const [effDate,setEffDate]=useState(todayISO());
   const set=(k,v)=>setF(s=>({...s,[k]:v}));
@@ -1651,7 +1731,7 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
         <div style={{height:12}} />
         <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
         <div style={{height:12}} />
-        <L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L>
+        <L label="Vent"><select value={f.vent?"Y":"N"} onChange={e=>set("vent",e.target.value==="Y")} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}><option value="N">No</option><option value="Y">Yes</option></select></L>
         {anyPastChange && (
           <div style={{ marginTop:12, fontSize:12, color:BRAND.ink, background:BRAND.paper, border:`1px solid ${BRAND.line}`, borderRadius:8, padding:"8px 10px" }}>
             <div style={{ fontWeight:600, marginBottom:4 }}>This will change:</div>
@@ -1677,7 +1757,7 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
       <div style={{height:12}} />
       <div style={{ display:"flex", gap:12 }}>
         <div style={{ flex:1 }}><L label="M/F"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
-        <div style={{ flex:1 }}><L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L></div>
+        <div style={{ flex:1 }}><L label="Vent"><select value={f.vent?"Y":"N"} onChange={e=>set("vent",e.target.value==="Y")} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}><option value="N">No</option><option value="Y">Yes</option></select></L></div>
       </div>
       <div style={{height:12}} />
       <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
@@ -3151,6 +3231,12 @@ function Rentals({ facility, data, update }) {
     return TERMINAL.includes(st) ? { ...d, rec: "gone" } : d;
   };
   const censusResidents = bbRes.filter((r) => r.name && !TERMINAL.includes(r.status) && r.status !== "Available" && r.status !== "Blocked").map((r) => ({ name: r.name, room: r.room, residentId: r.residentId }));
+  // Residents who have left (discharged/deceased/hospital) — a rental can still be logged
+  // against them (e.g. equipment found in the room after they left); it flags for return immediately.
+  const departedResidents = bedboardStore.getLeft(facility.name).map((p) => ({
+    name: p.name, room: p.room || "", residentId: p.id,
+    gone: p.leftReason === "Hospitalization" ? "Discharged" : p.leftReason,
+  }));
   const activeItems = items.filter((it) => !RENT_CLOSED.includes(rentStatusOf(it)));
   const closedItems = items.filter((it) => RENT_CLOSED.includes(rentStatusOf(it)));
   const monthly = activeItems.reduce((a, it) => a + (derive(it).m || 0), 0);
@@ -3207,12 +3293,12 @@ function Rentals({ facility, data, update }) {
           })}
         </Table>
       )}
-      {modal && <RentalModal item={modal} residents={censusResidents} onClose={() => setModal(null)} onSave={(x) => { save(x); setModal(null); }} onDelete={() => { del(modal.id); setModal(null); }} />}
+      {modal && <RentalModal item={modal} residents={censusResidents} departed={departedResidents} onClose={() => setModal(null)} onSave={(x) => { save(x); setModal(null); }} onDelete={() => { del(modal.id); setModal(null); }} />}
     </div>
   );
 }
 
-function RentalModal({ item, residents = [], onClose, onSave, onDelete }) {
+function RentalModal({ item, residents = [], departed = [], onClose, onSave, onDelete }) {
   const [f, setF] = useState({ id: item.id, resident: item.resident || "", residentId: item.residentId || null, room: item.room || "", status: rentStatusOf(item),
     equipment: item.equipment || "", category: item.category || "Mattress/Bed", startDate: item.startDate || "",
     daily: item.daily ?? "", monthly: item.monthly ?? "", purchase: item.purchase ?? "", comments: item.comments || "" });
@@ -3223,6 +3309,14 @@ function RentalModal({ item, residents = [], onClose, onSave, onDelete }) {
   const pickResident = (v) => {
     if (v === "__manual") { setManual(true); return; }
     setManual(false);
+    if (v.startsWith("gone:")) {
+      const p = departed.find((x) => "gone:" + x.residentId === v);
+      if (p) {
+        setF((prev) => ({ ...prev, resident: p.name, room: p.room || prev.room, residentId: p.residentId }));
+        toast("This resident has left the facility — the rental will flag for return.");
+      }
+      return;
+    }
     const hit = residents.find((r) => r.name === v);
     // Store the permanent resident ID with the rental — renames can no longer break the link.
     setF((p) => ({ ...p, resident: v, room: hit ? hit.room : p.room, residentId: hit ? hit.residentId : p.residentId }));
@@ -3239,9 +3333,12 @@ function RentalModal({ item, residents = [], onClose, onSave, onDelete }) {
               <button onClick={() => { setManual(false); set("resident", ""); }} className="text-xs rounded-md px-2" style={{ border: `1px solid ${BRAND.line}`, whiteSpace: "nowrap" }} title="Pick from census instead">List</button>
             </div>
           ) : (
-            <select value={f.resident} onChange={(e) => pickResident(e.target.value)} style={{ ...inpStyle, background: "#fff" }}>
+            <select value={departed.some((p)=>p.residentId===f.residentId) ? "gone:"+f.residentId : f.resident} onChange={(e) => pickResident(e.target.value)} style={{ ...inpStyle, background: "#fff" }}>
               <option value="">— select resident —</option>
               {residents.map((r) => <option key={r.name + r.room} value={r.name}>{r.name} · Rm {r.room}</option>)}
+              {departed.length > 0 && <optgroup label="Left the facility (rental will flag for return)">
+                {departed.map((p) => <option key={"gone-" + p.residentId} value={"gone:" + p.residentId}>{p.name}{p.room ? " · Rm " + p.room : ""} — {p.gone}</option>)}
+              </optgroup>}
               <option value="__manual">House / other (type manually)</option>
             </select>
           )}
