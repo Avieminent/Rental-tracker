@@ -1033,11 +1033,16 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const displayRes = _leftToday.length === 0 ? _baseRows : (() => {
     const rows = _baseRows.map(r => ({ ...r }));
     _leftToday.forEach(p => {
-      // Always an EXTRA read-only row — the bed row itself stays visible and fully usable
-      // (Available, can take a new admit) even on the event day.
+      // One row per bed: if the freed bed is still empty, the departed person's frozen
+      // record TAKES that row, marked "bed open for admit" (no duplicate room lines).
+      // Only if the bed was already refilled does the record appear as an extra row.
       const asRow = { ...p, _left: true, id: "left-" + p.id, status: p.leftStatus, disc: p.leftReason==="Discharged" ? p.leftDetail : (p.disc||{}), death: p.leftReason==="Deceased" ? p.leftDetail : (p.death||{}), hosp: p.leftReason==="Hospitalization" ? p.leftDetail : (p.hosp||{}) };
       const bedIdx = rows.findIndex(r => r.id === p.bedIdAtExit);
-      if (bedIdx >= 0) rows.splice(bedIdx + 1, 0, asRow); else rows.push(asRow);
+      if (bedIdx >= 0 && !rows[bedIdx].name && !rows[bedIdx].residentId) {
+        rows[bedIdx] = { ...asRow, id: rows[bedIdx].id, wing: rows[bedIdx].wing, room: rows[bedIdx].room, _bedFree: true };
+      }
+      // Bed already refilled: the new resident's row stands alone — the departed person
+      // shows only in the Discharges/Deaths boxes, RFMS, and hospital history.
     });
     return rows;
   })();
@@ -1178,9 +1183,10 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   };
 
   const counts = useMemo(() => {
-    let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0;
+    let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0, totalBeds=0;
     displayRes.forEach(r => {
-      if (r._left) return; // record-rows of departed residents don't count as beds
+      if (r._left) { if (r._bedFree) { totalBeds++; avail++; } return; } // frozen record on a free bed = one available bed
+      totalBeds++;
       if (holdsBed(r)) occ++;
       if (r.status==="Available") avail++;
       if (r.status==="Hospitalization") hosp++;
@@ -1189,7 +1195,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
       if (r.mf==="M" && IN_FACILITY.includes(r.status)) m++;
       if (r.mf==="F" && IN_FACILITY.includes(r.status)) fem++;
     });
-    return { total:displayRes.length, occ, avail, hosp, bh, vent, m, fem, occPct: displayRes.length ? Math.round(occ/res.length*100) : 0 };
+    return { total:totalBeds, occ, avail, hosp, bh, vent, m, fem, occPct: totalBeds ? Math.round(occ/totalBeds*100) : 0 };
   }, [res]);
 
   const wings = useMemo(() => {
@@ -1211,7 +1217,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     // with their real status colors — the row is read-only; the bed row above it is the live bed.
     if (r._left) {
       const st = STATUS[r.status] || STATUS.Available;
-      return { st, shown: (r.name || "(no name)") + "  ·  left " + (r.leftDate || ""), freed: false };
+      return { st, shown: (r.name || "(no name)") + "  ·  left " + (r.leftDate || "") + (r._bedFree ? "  —  bed open for admit" : ""), freed: false };
     }
     const reserved = r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y";
     const freed = TERMINAL.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && !reserved);
@@ -1304,7 +1310,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         <div className="grid gap-5" style={{ gridTemplateColumns:"1.5fr 1fr" }}>
           <div className="flex flex-col gap-4">
             {wings.map(([wing, list]) => {
-              const bedsOnly = list.filter(r => !r._left);
+              const bedsOnly = list.filter(r => !r._left || r._bedFree);
               const occ = bedsOnly.filter(holdsBed).length;
               const av = bedsOnly.length - occ;
               return (
@@ -1339,7 +1345,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                             </select>
                           </td>
                           <td className="px-2 py-1.5 text-center">
-                            <select disabled={viewing || r._left} value={r.vent?"Y":"N"} onChange={e=>{
+                            <select disabled={viewing || r._left || r.status==="Hospitalization"} value={r.vent?"Y":"N"} onChange={e=>{
                               const nv = e.target.value==="Y";
                               setRes(rs=>rs.map(x=>x.id===r.id?{...x, vent:nv, payerLog:[...(x.payerLog||[]), { kind:"vent", date:todayISO(), loggedDate:todayISO(), from:x.vent?"Yes":"No", to:nv?"Yes":"No" }]}:x));
                             }} style={{ fontSize:12, padding:"2px 2px", borderRadius:6, border:`1px solid ${BRAND.line}`, width:"46px", maxWidth:"46px", opacity:(viewing||r._left)?0.7:1 }}>
@@ -1848,7 +1854,7 @@ function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSav
       <div style={{height:12}} />
       <div style={{ display:"flex", gap:12 }}>
         <div style={{ flex:1 }}><L label="M/F"><select value={f.mf} onChange={e=>set("mf",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option><option>M</option><option>F</option></select></L></div>
-        <div style={{ flex:1 }}><L label="Vent"><select value={f.vent?"Y":"N"} onChange={e=>set("vent",e.target.value==="Y")} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}><option value="N">No</option><option value="Y">Yes</option></select></L></div>
+        <div style={{ flex:1 }}><L label="Vent"><select disabled={resident?.status==="Hospitalization"} title={resident?.status==="Hospitalization"?"Vent is locked while hospitalized":""} value={f.vent?"Y":"N"} onChange={e=>set("vent",e.target.value==="Y")} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}><option value="N">No</option><option value="Y">Yes</option></select></L></div>
       </div>
       <div style={{height:12}} />
       <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
