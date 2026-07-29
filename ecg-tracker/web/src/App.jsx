@@ -545,6 +545,9 @@ const HOSP = ["Hospitalization"];
 const TERMINAL = ["Discharged","Deceased"];
 const IN_FACILITY = ["Active","Admitting","Room Move","COVID+","Iso"];
 const holdsBed = (r) => IN_FACILITY.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold==="Y");
+// blocksBed: the bed cannot be given to a new resident. Everything that holds a bed blocks it,
+// plus "no bedhold but expected to return" — vacant for census/billing, but reserved until resolved.
+const blocksBed = (r) => holdsBed(r) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y");
 
 const PAYERS = [["Medicare A","MCA"],["Medicare Replacement","MR"],["Medicaid","MCD"],["Managed Medicaid","MM"],["Medicaid Pending","MP"],["Private Insurance","PI"],["Private Pay","PP"],["Medicaid Hospice","HM"],["Hospice Private","HP"],["LOA","LOA"],["Other","OTH"]];
 const nowHM = () => new Date().toTimeString().slice(0,5);
@@ -552,65 +555,354 @@ const nowHM = () => new Date().toTimeString().slice(0,5);
 /* Shared in-session store: the bedboard writes here, other pages read here.
    Still browser-only — everything resets on refresh. */
 const bedboardStore = {
-  data: {},          // facilityName -> resident array
-  history: {},       // facilityName -> { dateISO: snapshot }
-  recordId: {},      // facilityName -> Neon record id for module 'census'
-  facilityId: {},    // facilityName -> facility uuid
-  saveTimer: {},     // facilityName -> debounce timer
+  // ============ RESIDENT-ID MODEL (v2) ============
+  // people:  facilityName -> { personId: {person record} }   THE BASE. Everyone ever, forever.
+  // beds:    facilityName -> [ { id: bedId, wing, room, residentId|null } ]  fixed layout, pointers only.
+  // history: facilityName -> { dateISO: [joined rows] }  same shape as v1, rows carry residentId.
+  people: {},
+  beds: {},
+  history: {},
+  recordId: {},
+  facilityId: {},
+  saveTimer: {},
+  baseline: {},
+  migrationNote: {}, // facilityName -> one-time conversion report (shown to admins)
   listeners: new Set(),
-  // Load saved boards from the bootstrap records (called once at startup).
-  hydrate(records, facilities) {
-    (facilities || []).forEach((f) => { this.facilityId[f.name] = f.id; });
-    (records || []).forEach((r) => {
-      if (r.module !== "census" || r.collection !== "board") return;
-      const f = (facilities || []).find((x) => x.id === r.facility_id);
-      if (!f) return;
-      this.recordId[f.name] = r.id;
-      this.data[f.name] = Array.isArray(r.data?.residents) ? r.data.residents : [];
-      this.history[f.name] = r.data?.history || {};
+
+  // ---- The joined view: what components see. Row id = bed id (stable targeting). ----
+  _join(fac) {
+    const ppl = this.people[fac] || {};
+    return (this.beds[fac] || []).map(b => {
+      const p = b.residentId ? ppl[b.residentId] : null;
+      if (!p) return { id: b.id, wing: b.wing, room: b.room, residentId: null, name: "", status: "Available", mf: "", vent: false, payer: "", hosp: {}, disc: {}, death: {} };
+      return { ...p, id: b.id, wing: b.wing, room: b.room, residentId: p.id };
     });
-    this.listeners.forEach((l) => l());
   },
-  get(fac) { if (!this.data[fac]) this.data[fac] = emptyBoard(fac); return this.data[fac]; },
+
+  // ---- Decompose edited joined rows back into people + pointers. Never deletes people. ----
+  _decompose(fac, rows) {
+    const ppl = this.people[fac] = this.people[fac] || {};
+    const beds = this.beds[fac] = this.beds[fac] || [];
+    const bedById = {}; beds.forEach(b => { bedById[b.id] = b; });
+    rows.forEach(row => {
+      const bed = bedById[row.id]; if (!bed) return;
+      const { id, wing, room, residentId, ...personFields } = row;
+      if (row.name) {
+        let pid = residentId;
+        if (!pid || !ppl[pid]) { pid = "res_" + uid(); }
+        ppl[pid] = { ...(ppl[pid] || {}), ...personFields, id: pid };
+        bed.residentId = pid;
+      } else {
+        bed.residentId = null; // bed emptied; the person record (if any) stays in the base
+      }
+    });
+  },
+
+  get(fac) { if (!this.beds[fac]) this._initEmpty(fac); return this._join(fac); },
+  _initEmpty(fac) {
+    this.people[fac] = this.people[fac] || {};
+    this.beds[fac] = [];
+    (BEDBOARD_LAYOUT[fac] || []).forEach(w => w.beds.forEach(b => {
+      this.beds[fac].push({ id: uid(), wing: w.wing, room: b.room, residentId: null });
+    }));
+  },
+
   set(fac, updater) {
-    this.data[fac] = typeof updater === "function" ? updater(this.get(fac)) : updater;
-    (this.history[fac] = this.history[fac] || {})[todayISO()] = this.data[fac];
-    this.listeners.forEach((l) => l());
+    const joined = this._join(fac);
+    const next = typeof updater === "function" ? updater(joined) : updater;
+    this._decompose(fac, next);
+    (this.history[fac] = this.history[fac] || {})[todayISO()] = this._join(fac);
+    this.listeners.forEach(l => l());
     this.persist(fac);
   },
-  // Debounced save of one facility's board to Neon.
+
+  // ---- People who left their bed (terminal status, no bed). Same shape RFMS/Rentals already use. ----
+  getLeft(fac) {
+    const ppl = this.people[fac] || {};
+    const onBed = new Set((this.beds[fac] || []).map(b => b.residentId).filter(Boolean));
+    return Object.values(ppl).filter(p => p.leftReason && !onBed.has(p.id));
+  },
+  updateLeft(fac, personId, updater) {
+    const ppl = this.people[fac] || {};
+    if (ppl[personId]) { ppl[personId] = updater({ ...ppl[personId] }); this.listeners.forEach(l => l()); this.persist(fac); }
+  },
+
+  // ---- Leave-the-bed event: mark the person, clear the pointer, scrub history from the event date. ----
+  moveToLeft(fac, bedId, reason, detail) {
+    const beds = this.beds[fac] || [];
+    const bed = beds.find(b => b.id === bedId);
+    const ppl = this.people[fac] || {};
+    const p = bed && bed.residentId ? ppl[bed.residentId] : null;
+    if (!p || !p.name) return null;
+    const leftDate = (detail && detail.date) || todayISO();
+    ppl[p.id] = { ...p,
+      room: bed.room, wing: bed.wing,
+      status: reason, leftReason: reason, leftDate, leftDetail: detail || {}, leftStatus: reason, bedIdAtExit: bedId,
+      disc: reason === "Discharged" ? (detail || {}) : (p.disc || {}),
+      death: reason === "Deceased" ? (detail || {}) : (p.death || {}),
+      hosp: reason === "Hospitalization" ? (detail || {}) : (p.hosp || {}),
+    };
+    bed.residentId = null;
+    const cleanRow = (x) => ({ id: x.id, wing: x.wing, room: x.room, residentId: null, name: "", status: "Available", mf: "", vent: false, payer: "", hosp: {}, disc: {}, death: {}, spend: [], trust: undefined, trustHistory: undefined, payerLog: [], hospLog: [] });
+    const hist = (this.history[fac] = this.history[fac] || {});
+    const isP = (x) => (x.residentId && x.residentId === p.id) || (!x.residentId && (x.name || "") === p.name);
+    Object.keys(hist).forEach(day => {
+      if (day >= leftDate && Array.isArray(hist[day]))
+        hist[day] = hist[day].map(x => isP(x) ? cleanRow(x) : x);
+    });
+    hist[todayISO()] = this._join(fac);
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+    return ppl[p.id];
+  },
+
+  // ---- Room moves: pure pointer changes. Nothing about a person is copied, so nothing can be lost. ----
+  applyMoves(fac, moves) {
+    // moves = [{ fromId, toId }] — bed ids. Repoint atomically.
+    const beds = this.beds[fac] || [];
+    const byId = {}; beds.forEach(b => { byId[b.id] = b; });
+    const seen = new Set();
+    const clean = moves.filter(m => { if (seen.has(m.fromId) || !byId[m.fromId] || !byId[m.toId]) return false; seen.add(m.fromId); return true; });
+    const payload = {}; clean.forEach(m => { payload[m.toId] = byId[m.fromId].residentId; });
+    const vacated = new Set(clean.map(m => m.fromId));
+    const landed = new Set(clean.map(m => m.toId));
+    clean.forEach(m => { byId[m.toId].residentId = payload[m.toId]; });
+    vacated.forEach(fid => { if (!landed.has(fid)) byId[fid].residentId = null; });
+    (this.history[fac] = this.history[fac] || {})[todayISO()] = this._join(fac);
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
+
+  // ---- Later-activity scan for the backdate warning (by resident id, name fallback for old days). ----
+  laterActivity(fac, bedId, fromISO) {
+    // Person-based: find WHO is on this bed now, then scan every history row that belongs
+    // to that person after the date — whichever bed they were in on those days.
+    const hist = this.history[fac] || {};
+    const bed = (this.beds[fac] || []).find(b => b.id === bedId);
+    const live = bed && bed.residentId ? (this.people[fac] || {})[bed.residentId] : null;
+    if (!live || !live.name) return [];
+    const mine = (row) => row && ((row.residentId && row.residentId === live.id) || (!row.residentId && (row.name || "") === live.name));
+    const rowOn = (day) => { const snap = hist[day]; if (!Array.isArray(snap)) return null; return snap.find(mine) || null; };
+    const baseRow = rowOn(fromISO) || { ...live, residentId: live.id };
+    const days = Object.keys(hist).filter(d => d > fromISO).sort();
+    const out = []; const seen = { payer: false, vent: false, status: false };
+    days.forEach(day => {
+      const row = rowOn(day);
+      if (!row) return;
+      if (!seen.payer && (row.payer || "") !== (baseRow.payer || "")) { seen.payer = true; out.push("Payer changed on " + day + " (" + (baseRow.payer || "—") + " → " + (row.payer || "—") + ")"); }
+      if (!seen.vent && !!row.vent !== !!baseRow.vent) { seen.vent = true; out.push("Vent changed on " + day); }
+      if (!seen.status && row.status !== baseRow.status) { seen.status = true; out.push("Status changed on " + day + " (" + baseRow.status + " → " + row.status + ")"); }
+    });
+    (live.spend || []).forEach(e => {
+      if (e.date && e.date > fromISO) out.push("$" + (e.amount || 0) + " spend entry on " + e.date + (e.desc ? " (" + e.desc + ")" : ""));
+    });
+    return out;
+  },
+
+  // ---- Backfill add: new person from a past date forward. ----
+  backfillResident(fac, bedId, fields, fromISO) {
+    const ppl = this.people[fac] = this.people[fac] || {};
+    const pid = "res_" + uid();
+    ppl[pid] = { id: pid, name: fields.name, mf: fields.mf, vent: fields.vent, payer: fields.payer, status: "Active", admit: fromISO, spend: [], trust: undefined, trustHistory: undefined, payerLog: [], hospLog: [], hosp: {}, disc: {}, death: {} };
+    const bed = (this.beds[fac] || []).find(b => b.id === bedId);
+    if (bed) bed.residentId = pid;
+    const hist = (this.history[fac] = this.history[fac] || {});
+    const rowShape = (x) => ({ ...x, residentId: pid, name: fields.name, mf: fields.mf, vent: fields.vent, payer: fields.payer, status: "Active", admit: fromISO, spend: [], trust: undefined, trustHistory: undefined, payerLog: [], hospLog: [], hosp: {}, disc: {}, death: {} });
+    Object.keys(hist).forEach(day => { if (day >= fromISO && Array.isArray(hist[day])) hist[day] = hist[day].map(x => x.id === bedId ? rowShape(x) : x); });
+    hist[todayISO()] = this._join(fac);
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
+
+  // ---- Effective-dated corrections (payer/vent/non-event status) — history rows + live person. ----
+  previewFieldForward(fac, bedId, field, value, fromISO) {
+    const hist = this.history[fac] || {};
+    const days = Object.keys(hist).filter(d => d >= fromISO).sort();
+    const rowAt = (day) => { const snap = hist[day]; return Array.isArray(snap) ? snap.find(x => x.id === bedId) : null; };
+    const liveRows = this._join(fac);
+    const liveRow = liveRows.find(x => x.id === bedId);
+    const startRow = (days.length ? rowAt(days[0]) : null) || liveRow;
+    const startName = startRow ? (startRow.name || "") : "";
+    const startPid = startRow ? startRow.residentId : null;
+    const sameStay = (row) => row && startName !== "" && (((row.residentId && startPid) ? row.residentId === startPid : (row.name || "") === startName));
+    const baseVal = startRow ? startRow[field] : undefined;
+    let stopBefore = null, tenancyEnd = null;
+    for (let i = 1; i < days.length; i++) {
+      const row = rowAt(days[i]);
+      if (!sameStay(row)) { tenancyEnd = days[i]; break; }
+      if (row[field] !== baseVal) { stopBefore = days[i]; break; }
+    }
+    const boundary = stopBefore || tenancyEnd;
+    const affected = boundary ? days.filter(d => d < boundary) : days.slice();
+    const reachesToday = !boundary && sameStay(liveRow);
+    return { count: affected.length + (reachesToday ? 1 : 0), from: fromISO, stopBefore, tenancyEnd, reachesToday };
+  },
+  editFieldForward(fac, bedId, field, value, fromISO) {
+    const prev = this.previewFieldForward(fac, bedId, field, value, fromISO);
+    const hist = this.history[fac] = this.history[fac] || {};
+    const days = Object.keys(hist).filter(d => d >= fromISO).sort();
+    const boundary = prev.stopBefore || prev.tenancyEnd;
+    days.forEach(day => {
+      if ((!boundary || day < boundary) && Array.isArray(hist[day]))
+        hist[day] = hist[day].map(x => x.id === bedId ? { ...x, [field]: value } : x);
+    });
+    if (prev.reachesToday) {
+      const bed = (this.beds[fac] || []).find(b => b.id === bedId);
+      const ppl = this.people[fac] || {};
+      if (bed && bed.residentId && ppl[bed.residentId]) {
+        ppl[bed.residentId] = { ...ppl[bed.residentId], [field]: value };
+        hist[todayISO()] = this._join(fac);
+      }
+    }
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
+
+  // ============ HYDRATE + ONE-TIME v1 -> v2 CONVERSION ============
+  hydrate(records, facilities) {
+    (facilities || []).forEach(f => { this.facilityId[f.name] = f.id; });
+    (records || []).forEach(r => {
+      if (r.module !== "census" || r.collection !== "board") return;
+      const f = (facilities || []).find(x => x.id === r.facility_id);
+      if (!f) return;
+      this.recordId[f.name] = r.id;
+      const d = r.data || {};
+      if (d.v === 2 && d.people) {
+        this.people[f.name] = d.people || {};
+        this.beds[f.name] = Array.isArray(d.beds) ? d.beds : [];
+        this.history[f.name] = d.history || {};
+      } else {
+        this._convertV1(f.name, d); // in-memory; commits (with backup) on first save
+      }
+      this._setBaseline(f.name, this._snapPayload(f.name));
+    });
+    this.listeners.forEach(l => l());
+  },
+
+  _convertV1(fac, d) {
+    const rows = Array.isArray(d.residents) ? d.residents : [];
+    const leftV1 = Array.isArray(d.left) ? d.left : [];
+    const histV1 = d.history || {};
+    const ppl = this.people[fac] = {};
+    const beds = this.beds[fac] = [];
+    let converted = 0, keptLeft = 0, recovered = 0;
+    // 1. Board rows -> beds (+ people for occupied)
+    rows.forEach(r => {
+      const bed = { id: r.id, wing: r.wing, room: r.room, residentId: null };
+      if (r.name) {
+        const pid = "res_" + uid();
+        const person = { ...r }; delete person.id;
+        ppl[pid] = { ...person, id: pid };
+        bed.residentId = pid; converted++;
+      }
+      beds.push(bed);
+    });
+    // 2. Left list -> people (already person-shaped with ids)
+    leftV1.forEach(p => { ppl[p.id] = { ...p }; keptLeft++; });
+    // 3. History: annotate rows with residentId (bed+name match), recover lost people
+    const liveByBedName = {}; beds.forEach(b => { if (b.residentId) liveByBedName[b.id + "\u0000" + ppl[b.residentId].name] = b.residentId; });
+    const leftByName = {}; leftV1.forEach(p => { leftByName[p.name] = p.id; });
+    const hist = this.history[fac] = {};
+    const seenGone = {}; // name+bed -> recovered pid
+    const dayKeys = Object.keys(histV1).sort();
+    dayKeys.forEach(day => {
+      const snap = histV1[day];
+      if (!Array.isArray(snap)) return;
+      hist[day] = snap.map(x => {
+        if (!x.name) return { ...x, residentId: null };
+        let pid = liveByBedName[x.id + "\u0000" + x.name] || leftByName[x.name] || null;
+        if (!pid) {
+          const k = x.id + "\u0000" + x.name;
+          if (!seenGone[k]) {
+            const npid = "res_" + uid();
+            const person = { ...x }; delete person.id; delete person.residentId;
+            ppl[npid] = { ...person, id: npid, leftReason: TERMINAL.includes(x.status) ? x.status : "Discharged", leftStatus: TERMINAL.includes(x.status) ? x.status : "Discharged", leftDate: day, leftDetail: { note: "Recovered from history during the resident-ID upgrade" }, bedIdAtExit: x.id, status: TERMINAL.includes(x.status) ? x.status : "Discharged" };
+            seenGone[k] = npid; recovered++;
+          }
+          pid = seenGone[k];
+          // keep their last-seen day updated so leftDate ends up as the LAST day they appear
+          if (ppl[pid] && ppl[pid].leftDetail && ppl[pid].leftDetail.note) ppl[pid].leftDate = day;
+        }
+        return { ...x, residentId: pid };
+      });
+    });
+    this.migrationNote[fac] = { converted, keptLeft, recovered, days: dayKeys.length };
+    this._needsBackup = this._needsBackup || {}; this._needsBackup[fac] = d; // original payload, backed up on first save
+  },
+
+  _snapPayload(fac) { return { type: "board", v: 2, people: this.people[fac] || {}, beds: this.beds[fac] || [], history: this.history[fac] || {} }; },
+  _setBaseline(fac, payload) { try { this.baseline[fac] = JSON.parse(JSON.stringify(payload)); } catch { this.baseline[fac] = null; } },
+
+  // ---- Multi-user merge on v2 shapes: people by id, bed pointers, history days. ----
+  _mergeV2(base, mine, theirs) {
+    const J = x => JSON.stringify(x ?? null);
+    const mergedPeople = { ...(theirs.people || {}) };
+    Object.keys(mine.people || {}).forEach(pid => {
+      const b = base && base.people ? base.people[pid] : undefined;
+      const t = (theirs.people || {})[pid];
+      const m = mine.people[pid];
+      if (!t) mergedPeople[pid] = m;
+      else if (J(t) === J(b)) mergedPeople[pid] = m;
+      else if (J(m) === J(b)) mergedPeople[pid] = t;
+      else mergedPeople[pid] = m;
+    });
+    const tBeds = {}; (theirs.beds || []).forEach(b => { tBeds[b.id] = b; });
+    const bBeds = {}; ((base && base.beds) || []).forEach(b => { bBeds[b.id] = b; });
+    const mergedBeds = (mine.beds || []).map(m => {
+      const t = tBeds[m.id], b = bBeds[m.id];
+      if (!t) return m;
+      if (J(t) === J(b)) return m;
+      if (J(m) === J(b)) return t;
+      return m;
+    });
+    (theirs.beds || []).forEach(t => { if (!(mine.beds || []).some(m => m.id === t.id)) mergedBeds.push(t); });
+    const mergedHist = {};
+    const days = new Set([...Object.keys(mine.history || {}), ...Object.keys(theirs.history || {})]);
+    days.forEach(dd => {
+      const bD = (base && base.history && base.history[dd]) || null;
+      const mD = (mine.history || {})[dd] || null;
+      const tD = (theirs.history || {})[dd] || null;
+      if (mD && tD) {
+        if (J(tD) === J(bD)) mergedHist[dd] = mD; else if (J(mD) === J(bD)) mergedHist[dd] = tD; else mergedHist[dd] = mD;
+      } else mergedHist[dd] = mD || tD;
+    });
+    return { type: "board", v: 2, people: mergedPeople, beds: mergedBeds, history: mergedHist };
+  },
+
   persist(fac) {
     clearTimeout(this.saveTimer[fac]);
     this.saveTimer[fac] = setTimeout(async () => {
       const fid = this.facilityId[fac];
-      if (!fid) return; // facility id unknown (e.g. before hydrate) — skip
-      const payload = { type: "board", residents: this.data[fac] || [], history: this.history[fac] || {} };
+      if (!fid) return;
+      let payload = this._snapPayload(fac);
       try {
+        // One-time safety backup of the pre-upgrade board, before the first v2 save.
+        if (this._needsBackup && this._needsBackup[fac]) {
+          try { await createRecord("census", "board-v1-backup", fid, this._needsBackup[fac]); delete this._needsBackup[fac]; }
+          catch { /* backup failed — do NOT save v2 over v1 without a backup */ return; }
+        }
         if (this.recordId[fac]) {
+          try {
+            const remote = await api(`/api/records/${this.recordId[fac]}`);
+            const theirs = remote && remote.data;
+            if (theirs && theirs.v === 2 && this.baseline[fac] && JSON.stringify(theirs) !== JSON.stringify(this.baseline[fac])) {
+              payload = this._mergeV2(this.baseline[fac], payload, theirs);
+              this.people[fac] = payload.people; this.beds[fac] = payload.beds; this.history[fac] = payload.history;
+              this.listeners.forEach(l => l());
+            }
+          } catch { /* GET failed — plain save */ }
           await updateRecord(this.recordId[fac], payload);
         } else {
           const id = await createRecord("census", "board", fid, payload);
           this.recordId[fac] = id;
         }
+        this._setBaseline(fac, payload);
       } catch { onErr(); }
     }, 800);
   },
-  // Correct one resident's field across a date range of snapshots (and the live board if the range reaches today).
-  // matchId is the resident's id; field is one of name/mf/vent/payer/status; value is the new value.
-  // Backfill a resident into a past date and every day forward (incl. today + live board).
-  // bedId identifies the empty bed to fill; fromISO is the day they should first appear.
-  backfillResident(fac, bedId, fields, fromISO) {
-    const apply = (arr) => arr.map(r => r.id === bedId
-      ? { ...r, name:fields.name, mf:fields.mf, vent:fields.vent, payer:fields.payer, status:"Active", admit: fromISO }
-      : r);
-    const hist = this.history[fac] || (this.history[fac] = {});
-    Object.keys(hist).forEach(day => { if (day >= fromISO && Array.isArray(hist[day])) hist[day] = apply(hist[day]); });
-    if (this.data[fac]) this.data[fac] = apply(this.data[fac]);
-    this.listeners.forEach((l) => l());
-    this.persist(fac);
-  },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
+
 function useBedboard(fac) {
   const [, tick] = useState(0);
   useEffect(() => bedboardStore.subscribe(() => tick((t) => t + 1)), []);
@@ -624,18 +916,8 @@ function useBedboardAll() {
   return all;
 }
 
-function emptyBoard(fac){
-  // Room layout only — no resident names. Staff fill these in; saved to the database.
-  const rs = [];
-  (BEDBOARD_LAYOUT[fac]||[]).forEach(w => w.beds.forEach(b => {
-    rs.push({ id: uid(), wing: w.wing, room: b.room, name: "",
-      status: "Available", mf:"", vent:false, payer:"",
-      hosp:{}, disc:{}, death:{} });
-  }));
-  return rs;
-}
 
-function BedboardModule({ facility: fac, canImport }){
+function BedboardModule({ facility: fac, canImport, isAdmin }){
   const facility = fac.name;
   const [res, setRes] = useBedboard(facility);
   const [viewDate, setViewDate] = useState(null); // null = live/today; else an ISO date to view historically
@@ -652,7 +934,21 @@ function BedboardModule({ facility: fac, canImport }){
     return last ? { rows: hist[last], actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
   };
   const _snap = viewing ? snapForDate(facility, viewDate) : { rows: res, actual: true, asOf: viewDate };
-  const displayRes = viewing ? _snap.rows : res;
+  // Overlay: residents who LEFT (discharged/deceased/hosp-gone) show on the census for their event day.
+  // If their old bed is empty that day they appear in it; if it was refilled, they show as an extra row.
+  const _dayShown = viewing ? viewDate : todayISO();
+  const _leftToday = bedboardStore.getLeft(facility).filter(p => p.leftDate === _dayShown);
+  const _baseRows = viewing ? _snap.rows : res;
+  const displayRes = _leftToday.length === 0 ? _baseRows : (() => {
+    const rows = _baseRows.map(r => ({ ...r }));
+    _leftToday.forEach(p => {
+      const bed = rows.find(r => r.id === p.bedIdAtExit);
+      const asRow = { ...p, _left: true, id: "left-" + p.id, status: p.leftStatus, disc: p.leftReason==="Discharged" ? p.leftDetail : (p.disc||{}), death: p.leftReason==="Deceased" ? p.leftDetail : (p.death||{}), hosp: p.leftReason==="Hospitalization" ? p.leftDetail : (p.hosp||{}) };
+      if (bed && !bed.name) { Object.assign(bed, asRow, { id: bed.id }); }
+      else rows.push(asRow);
+    });
+    return rows;
+  })();
   const carriedFrom = viewing && !_snap.actual ? _snap.asOf : null; // if set, board is carried forward from this earlier date
   const [adding, setAdding] = useState(false);
   const [modal, setModal] = useState(null); // {id, status}
@@ -672,31 +968,24 @@ function BedboardModule({ facility: fac, canImport }){
       return n;
     }));
   };
+  const [availFor, setAvailFor] = useState(null); // bed id pending the "make Available" flow
+  const [eventWarn, setEventWarn] = useState(null); // backdated-event warning (later activity exists)
   const setStatus = (id, status) => {
     if (status === "Room Move") { setShuffleFor(id); return; }
+    if (status === "Available") {
+      const row = res.find(r => r.id === id);
+      if (!row || !row.name) return; // already empty — nothing to do
+      setAvailFor(id); return;
+    }
     if (HOSP.includes(status) || TERMINAL.includes(status)) { setModal({ id, status }); return; }
     applyStatus(id, status);
   };
   // Apply a whole shuffle at once. moves = [{ fromId, toId }] where fromId is the
   // resident being moved and toId is the destination BED (row) they move into.
   const applyShuffle = (moves) => {
-    setRes(rs => {
-      const byId = Object.fromEntries(rs.map(r => [r.id, r]));
-      // snapshot the "person" payload for each mover before we overwrite anything
-      const carry = (r) => ({ name:r.name, mf:r.mf, vent:r.vent, payer:r.payer, status:"Active", admit:r.admit||todayISO(), spend:r.spend||[], trust:r.trust, trustHistory:r.trustHistory, hosp:r.hosp||{}, disc:{}, death:{} });
-      // Guard: ignore any resident listed as a mover more than once (keep only their first move).
-      const seenMovers = new Set();
-      moves = moves.filter(m => { if (seenMovers.has(m.fromId)) return false; seenMovers.add(m.fromId); return true; });
-      const payloads = {}; moves.forEach(m => { if (byId[m.fromId]) payloads[m.toId] = carry(byId[m.fromId]); });
-      const movedFromBeds = new Set(moves.map(m => m.fromId));
-      const landedBeds = new Set(moves.map(m => m.toId));
-      return rs.map(r => {
-        if (payloads[r.id]) return { ...r, ...payloads[r.id] };         // someone moved INTO this bed
-        if (movedFromBeds.has(r.id) && !landedBeds.has(r.id))            // this bed's person left and nobody took it
-          return { ...r, name:"", mf:"", vent:false, payer:"", status:"Available", spend:[], trust:undefined, trustHistory:undefined, hosp:{}, disc:{}, death:{} };
-        return r;
-      });
-    });
+    // v2: a move is a pointer change — the person record never moves, so trust, spend,
+    // payer history and hospital history physically cannot be lost or swapped.
+    bedboardStore.applyMoves(facility, moves);
     setShuffleFor(null);
   };
 
@@ -755,28 +1044,30 @@ function BedboardModule({ facility: fac, canImport }){
         }
         if (!next.length) { toast("No resident rows found under the header."); return; }
         const layout = BEDBOARD_LAYOUT[facility] || [];
-        let finalRows = next, matched = 0, extras = 0;
-        if (layout.length) {
+        // v2: merge against the CURRENT board rows (real bed ids), never rebuild the layout.
+        let matched = 0, extras = 0, finalRows = next;
+        {
           const normRoom = (v) => String(v || "").trim().toLowerCase().replace(/\s+/g, "");
           const byRoom = {};
           next.forEach((r) => { const k = normRoom(r.room); if (!(k in byRoom)) byRoom[k] = r; });
           const used = new Set();
-          const merged = [];
-          layout.forEach((w) => w.beds.forEach((b) => {
-            const k = normRoom(b.room);
+          finalRows = res.map((row) => {
+            const k = normRoom(row.room);
             const hit = byRoom[k];
             if (hit && !used.has(k)) {
               used.add(k); matched++;
-              merged.push({ ...hit, wing: w.wing, room: b.room });
-            } else {
-              merged.push({ id: uid(), wing: w.wing, room: b.room, name: "", payer: "", mf: "", vent: false, status: "Available", admit: "", spend: [], hosp: {}, disc: {}, death: {} });
+              const sameName = (row.name || "") === (hit.name || "");
+              // Same person -> update in place. New/different person -> fresh resident record
+              // (residentId cleared; the previous occupant leaves the board per the warning).
+              return { ...row, name: hit.name, mf: hit.mf, vent: hit.vent, payer: hit.payer, status: hit.status || "Active", admit: hit.admit || row.admit, residentId: sameName ? row.residentId : undefined };
             }
-          }));
-          next.forEach((r) => { if (!used.has(normRoom(r.room))) { merged.push(r); extras++; } });
-          finalRows = merged;
+            // Room not in the file -> cleared (per the confirm warning)
+            return { ...row, residentId: undefined, name: "", mf: "", vent: false, payer: "", status: "Available", hosp: {}, disc: {}, death: {}, spend: [], trust: undefined, trustHistory: undefined, payerLog: [], hospLog: [] };
+          });
+          extras = next.filter((r) => !used.has(normRoom(r.room))).length;
         }
         const msg = layout.length
-          ? `Update the ${facility} board from the file? ${matched} room${matched === 1 ? "" : "s"} matched the official layout` + (extras ? `, ${extras} room${extras === 1 ? "" : "s"} from the file aren't in the layout and will be added at the bottom` : "") + `. Beds not in the file become Available.`
+          ? `Update the ${facility} board from the file? ${matched} room${matched === 1 ? "" : "s"} matched the official layout` + (extras ? `, ${extras} room${extras === 1 ? "" : "s"} from the file aren't in the official layout and will be skipped` : "") + `. Beds not in the file become Available.`
           : `This will replace the entire ${facility} board with ${next.length} rows from the file. Continue?`;
         setPendingImport({ rows: finalRows, msg });
       } catch (err) { toast("Couldn't read that file: " + err.message); }
@@ -804,9 +1095,11 @@ function BedboardModule({ facility: fac, canImport }){
     return Object.entries(m);
   }, [displayRes, facility]);
 
+  const migNote = bedboardStore.migrationNote ? bedboardStore.migrationNote[facility] : null;
   const inHospital = displayRes.filter(r => r.status==="Hospitalization");
-  const discharges = displayRes.filter(r => r.status==="Discharged");
-  const deaths     = displayRes.filter(r => r.status==="Deceased");
+  const _left = bedboardStore.getLeft(facility);
+  const discharges = _left.filter(p => p.leftReason==="Discharged").slice().reverse().map(p => ({ name:p.name, room:p.room, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
+  const deaths     = _left.filter(p => p.leftReason==="Deceased").slice().reverse().map(p => ({ name:p.name, room:p.room, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
@@ -862,7 +1155,14 @@ function BedboardModule({ facility: fac, canImport }){
           ))}
         </div>
 
-        {viewing && (
+        {migNote && isAdmin && (
+        <div className="rounded-lg px-4 py-2.5 mb-3" style={{ background:"#eef4ec", border:"1px solid #b7ccb2", fontSize:13 }}>
+          ✅ This facility was upgraded to the new resident-ID system: <b>{migNote.converted}</b> current residents converted,
+          <b> {migNote.keptLeft}</b> discharged/deceased kept, <b>{migNote.recovered}</b> recovered from history, {migNote.days} days of history preserved.
+          A backup of the old format was saved automatically.
+        </div>
+      )}
+      {viewing && (
           <div className="rounded-lg px-4 py-2.5 mb-4 flex items-center justify-between" style={{ background:"#f3ece1", border:`1px solid #d9c489`, color:BRAND.ink }}>
             <span style={{ fontSize:13 }}>📅 Viewing the board as it was on <b>{viewDate}</b> — historical snapshot.{carriedFrom ? <> No changes were saved on this date, so this shows the board as it stood on <b>{carriedFrom}</b> (the last day it was updated).</> : null}</span>
             <button onClick={()=>setViewDate(null)} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>Back to today</button>
@@ -899,8 +1199,8 @@ function BedboardModule({ facility: fac, canImport }){
                         <tr key={r.id} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background:st.tint }}>
                           <td className="px-2 py-1.5" style={{ borderLeft:`3px solid ${st.bar}` }}>{r.room}</td>
                           <td className="px-2 py-1.5" style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                            {holdsBed(r) && !viewing
-                              ? <button onClick={()=>setEditFor(r.id)} title="Edit resident details" style={{ background:"none", border:"none", padding:0, color:BRAND.ink, cursor:"pointer", textAlign:"left", maxWidth:"100%", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration:"underline", textDecorationColor:BRAND.line, textUnderlineOffset:"2px" }}>{shown}</button>
+                            {blocksBed(r)
+                              ? <button onClick={()=>setEditFor(r.id)} title={viewing?"Correct this resident's record from this date forward":"Edit resident details"} style={{ background:"none", border:"none", padding:0, color:BRAND.ink, cursor:"pointer", textAlign:"left", maxWidth:"100%", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration:"underline", textDecorationColor:BRAND.line, textUnderlineOffset:"2px" }}>{shown}</button>
                               : shown}
                           </td>
                           <td className="px-2 py-1.5">
@@ -912,7 +1212,7 @@ function BedboardModule({ facility: fac, canImport }){
                             <input type="checkbox" disabled={viewing} checked={r.vent} onChange={e=>setRes(rs=>rs.map(x=>x.id===r.id?{...x,vent:e.target.checked}:x))} />
                           </td>
                           <td className="px-1 py-1">
-                            <select value={TERMINAL.includes(r.status)?r.status:r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}` }}>
+                            <select disabled={viewing || r._left} value={r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
                               {STATUS_LIST.map(s=><option key={s} value={s}>{s}</option>)}
                             </select>
                           </td>
@@ -946,34 +1246,87 @@ function BedboardModule({ facility: fac, canImport }){
         </div>
       </div>
 
+      {eventWarn && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
+          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
+        </div>
+        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
+          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
+        </ul>
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:14 }}>Proceeding removes them from the board from {eventWarn.date} forward. Their RFMS and Rentals records are kept.</div>
+        <div className="flex justify-end gap-2">
+          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button onClick={eventWarn.run} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK — proceed</button>
+        </div>
+      </Overlay>}
+      {availFor && <AvailModal
+        resident={res.find(r=>r.id===availFor)}
+        isAdmin={isAdmin}
+        onCancel={()=>setAvailFor(null)}
+        onDischarge={()=>{ setModal({ id: availFor, status: "Discharged" }); setAvailFor(null); }}
+        onDeath={()=>{ setModal({ id: availFor, status: "Deceased" }); setAvailFor(null); }}
+        onAdminFree={()=>{ bedboardStore.moveToLeft(facility, availFor, "Discharged", { date: todayISO(), dischargedTo: "", note: "Bed marked available by admin" }); toast("Bed freed. Resident kept in RFMS and Rentals."); setAvailFor(null); }} />}
       {modal && <EventModal spec={modal} resident={res.find(r=>r.id===modal.id)}
         onCancel={()=>setModal(null)}
-        onConfirm={(detail)=>{ applyStatus(modal.id, modal.status, detail); setModal(null); }} />}
+        onConfirm={(detail)=>{
+          const isTerminal = TERMINAL.includes(modal.status);
+          const isHospGone = modal.status==="Hospitalization" && detail.bedhold!=="Y" && detail.expectedReturn!=="Y";
+          const runEvent = () => {
+            if (isTerminal) { bedboardStore.moveToLeft(facility, modal.id, modal.status, detail); toast(modal.status==="Deceased" ? "Recorded. Resident moved to the deceased list; bed freed." : "Recorded. Resident moved to the discharged list; bed freed."); }
+            else if (isHospGone) { bedboardStore.moveToLeft(facility, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
+            else applyStatus(modal.id, modal.status, detail);
+            setModal(null); setEventWarn(null);
+          };
+          if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
+            const acts = bedboardStore.laterActivity(facility, modal.id, detail.date);
+            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date }); return; }
+          }
+          runEvent();
+        }} />}
       {editFor && <EditResidentModal
-        resident={res.find(r=>r.id===editFor)}
+        resident={(viewing?displayRes:res).find(r=>r.id===editFor)}
+        viewDate={viewing?viewDate:null}
+        previewForward={(field,value)=>bedboardStore.previewFieldForward(facility, editFor, field, value, viewDate)}
         onCancel={()=>setEditFor(null)}
-        onSave={(d)=>{ setRes(rs=>rs.map(r=> {
-          if (r.id!==editFor) return r;
-          const next = { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer };
-          if (d._payerChanged) next.payerLog = [...(r.payerLog||[]), { date:d._effDate, from:d._prevPayer, to:d.payer }];
-          return next;
-        })); setEditFor(null); }} />}
+        onSave={(d)=>{
+          if (viewing) {
+            // Past-date correction: apply each changed field from viewDate forward (stopping at next change).
+            if (d._ventChanged)   bedboardStore.editFieldForward(facility, editFor, "vent",   d.vent,   viewDate);
+            if (d._payerFwd)      bedboardStore.editFieldForward(facility, editFor, "payer",  d.payer,  viewDate);
+            if (d._statusChanged) bedboardStore.editFieldForward(facility, editFor, "status", d.status, viewDate);
+            toast("Record corrected from " + viewDate + " forward.");
+          } else {
+            setRes(rs=>rs.map(r=> {
+              if (r.id!==editFor) return r;
+              const next = { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer };
+              if (d._payerChanged) next.payerLog = [...(r.payerLog||[]), { date:d._effDate, from:d._prevPayer, to:d.payer }];
+              return next;
+            }));
+          }
+          setEditFor(null);
+        }} />}
       {shuffleFor && <ShuffleModal
         seedId={shuffleFor}
-        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, occupied:holdsBed(r) }))}
+        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, occupied:blocksBed(r) }))}
         onCancel={()=>setShuffleFor(null)}
         onApply={applyShuffle} />}
       {pendingImport && (
         <Overlay>
           <div style={{ fontFamily: BB_SERIF, fontSize: 18, marginBottom: 8 }}>Confirm census import</div>
           <div style={{ fontSize: 13, color: BRAND.inkSoft, marginBottom: 14 }}>{pendingImport.msg}</div>
+          <div style={{ fontSize: 13, color: BRAND.ink, marginBottom: 14, lineHeight: 1.6 }}>
+            Rooms matched by the file are kept and updated. <b>Rooms not in the file are cleared</b> — any resident
+            in one of those rooms is removed from the board, including their funds and history. Residents already on
+            the discharged/deceased list are not affected. This can't be undone.
+          </div>
           <div className="flex justify-end gap-2">
             <button onClick={() => setPendingImport(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border: `1px solid ${BRAND.line}` }}>Cancel</button>
             <button onClick={() => { setRes(pendingImport.rows); setPendingImport(null); toast("Census imported."); }} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: BRAND.ink }}>Import</button>
           </div>
         </Overlay>
       )}
-      {adding && <AddModal openBeds={(viewing?displayRes:res).filter(r=>!holdsBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} backfillDate={viewing?viewDate:null} onCancel={()=>setAdding(false)}
+      {adding && <AddModal openBeds={(viewing?displayRes:res).filter(r=>!blocksBed(r)).map(r=>({ id:r.id, wing:r.wing, room:r.room }))} backfillDate={viewing?viewDate:null} onCancel={()=>setAdding(false)}
         onAdd={(d)=>{
           if (viewing) {
             // Backfill: add to the viewed day and every day forward + live board.
@@ -982,7 +1335,7 @@ function BedboardModule({ facility: fac, canImport }){
             setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, payerLog:[...(r.payerLog||[]), { date:viewDate, from:"", to:d.payer }] } : r));
             toast(`Backfilled ${d.name} from ${viewDate} forward.`);
           } else {
-            setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer, status:"Active", admit: todayISO(), hosp:{}, disc:{}, death:{} } : r ));
+            setRes(rs=>rs.map(r=> r.id===d.bedId ? { ...r, name:d.name, mf:d.mf, vent:d.vent, payer:d.payer, status:"Active", admit: todayISO(), hosp:{}, disc:{}, death:{}, spend:[], trust:undefined, trustHistory:undefined, payerLog:[], hospLog:[] } : r ));
           }
           setAdding(false);
         }} />}
@@ -1068,7 +1421,7 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
   const isDeath= spec.status==="Deceased";
   const [date,setDate]=useState(todayISO());
   const [time,setTime]=useState(nowHM());
-  const [extra,setExtra]=useState({ reason:"", sentBy:"", bedhold:"N", dischargedTo:"", cause:"", doctor:"", ama:"N", notes:"" });
+  const [extra,setExtra]=useState({ reason:"", sentBy:"", bedhold:"N", expectedReturn:"Y", dischargedTo:"", cause:"", doctor:"", ama:"N", notes:"" });
   const set=(k,v)=>setExtra(s=>({...s,[k]:v}));
   const title = isHosp ? "Hospitalization" : isDisc ? "Discharge" : "Death";
   const filled = (v)=> !!(v && String(v).trim());
@@ -1095,6 +1448,18 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
           </span>
         </div>
       )}
+      {isHosp && extra.bedhold==="N" && (
+        <div className="mb-3 flex items-center gap-2">
+          <span style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft }}>Expected to return?</span>
+          <select value={extra.expectedReturn} onChange={e=>set("expectedReturn",e.target.value)} className="rounded-md px-2 py-1 text-sm" style={{ border:`1px solid ${BRAND.line}`, width:"90px" }}>
+            <option value="Y">Yes</option>
+            <option value="N">No</option>
+          </select>
+          <span style={{ fontSize:12, color:BRAND.inkSoft }}>
+            {extra.expectedReturn==="Y" ? "bed reserved (not billed) until they return" : "treated as a discharge"}
+          </span>
+        </div>
+      )}
       <div className="grid gap-3 mb-3" style={{ gridTemplateColumns:"1fr 1fr" }}>
         <L label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:req(date) }} /></L>
         <L label="Time"><input type="time" value={time} onChange={e=>setTime(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:req(time) }} /></L>
@@ -1117,6 +1482,53 @@ function EventModal({ spec, resident, onConfirm, onCancel }){
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
         <button disabled={!complete} onClick={()=>complete && onConfirm({ date, time, ...extra })} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:complete?BRAND.ink:"#aaa", cursor:complete?"pointer":"not-allowed" }}>Confirm</button>
+      </div>
+    </Overlay>
+  );
+}
+
+function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCancel }){
+  const [other, setOther] = useState(false);
+  if (isAdmin) {
+    return (
+      <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Make this bed available?</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:14, lineHeight:1.5 }}>
+          This frees <b>{resident?.room}</b> and removes <b>{resident?.name}</b> from the bed board.
+          Their RFMS and Rentals records are kept. Continue?
+        </div>
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button onClick={onAdminFree} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK — free the bed</button>
+        </div>
+      </Overlay>
+    );
+  }
+  if (other) {
+    return (
+      <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>This change needs an administrator</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:14, lineHeight:1.5 }}>
+          Please email <b>centralc@eminentcaregroup.com</b> to make this change.
+        </div>
+        <div className="flex justify-end">
+          <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK</button>
+        </div>
+      </Overlay>
+    );
+  }
+  return (
+    <Overlay>
+      <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Why is this bed becoming available?</div>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:14 }}>{resident?.name} · Room {resident?.room}</div>
+      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        <button onClick={onDischarge} className="text-sm rounded-md px-3 py-2 text-left" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>The resident was <b>discharged</b></button>
+        <button onClick={onDeath} className="text-sm rounded-md px-3 py-2 text-left" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>The resident <b>passed away</b></button>
+        <button onClick={()=>setOther(true)} className="text-sm rounded-md px-3 py-2 text-left" style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }}>Other reason</button>
+      </div>
+      <div style={{ height:12 }} />
+      <div className="flex justify-end">
+        <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
       </div>
     </Overlay>
   );
@@ -1188,13 +1600,50 @@ function PayerChanges({ res, facility }){
   );
 }
 
-function EditResidentModal({ resident, onCancel, onSave }){
-  const [f,setF]=useState({ name:resident?.name||"", mf:resident?.mf||"", vent:!!resident?.vent, payer:resident?.payer||"" });
+function EditResidentModal({ resident, viewDate, previewForward, onCancel, onSave }){
+  const past = !!viewDate;
+  const EVENT_STATUSES = ["Hospitalization","Discharged","Deceased","Available","Room Move"];
+  const STATUS_OPTS = ((typeof STATUS!=="undefined") ? Object.keys(STATUS) : ["Active","Admitting","Iso","COVID+"]).filter(k => !EVENT_STATUSES.includes(k));
+  const [f,setF]=useState({ name:resident?.name||"", mf:resident?.mf||"", vent:!!resident?.vent, payer:resident?.payer||"", status:resident?.status||"Active" });
   const [effDate,setEffDate]=useState(todayISO());
   const set=(k,v)=>setF(s=>({...s,[k]:v}));
   const payerChanged = f.payer !== (resident?.payer||"");
+  const ventChanged = f.vent !== !!resident?.vent;
+  const statusChanged = f.status !== (resident?.status||"Active");
   const payerName=(c)=>{ const hit=PAYERS.find(([n,code])=>code===c); return hit?hit[0]:(c||"—"); };
   const history = resident?.payerLog || [];
+
+  const anyPastChange = ventChanged || payerChanged || statusChanged;
+  const fwd = (field,val) => { try { return previewForward ? previewForward(field,val) : null; } catch { return null; } };
+
+  if (past) {
+    return (
+      <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:4 }}>Correct record</div>
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:4 }}>{resident?.name} · Room {resident?.room}</div>
+        <div style={{ fontSize:12, color:BRAND.inkSoft, marginBottom:12, background:"#f3ece1", border:`1px solid #d9c489`, borderRadius:6, padding:"6px 8px" }}>Changes here apply from <b>{viewDate}</b> forward, and stop automatically if the value already changed on a later date. Name and M/F aren't backdated here. To record a backdated <b>discharge, death, hospitalization or room move</b>, go back to today's board, pick the status from the dropdown, and set the actual date in the popup.</div>
+        <L label="Status"><select value={f.status} onChange={e=>set("status",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>{STATUS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></L>
+        <div style={{height:12}} />
+        <L label="Payer"><select value={f.payer} onChange={e=>set("payer",e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}><option value=""></option>{PAYERS.map(([n,c])=><option key={c} value={c}>{n} ({c})</option>)}</select></L>
+        <div style={{height:12}} />
+        <L label="Vent"><label style={{ display:"flex", alignItems:"center", gap:8, height:"38px" }}><input type="checkbox" checked={f.vent} onChange={e=>set("vent",e.target.checked)} /> <span style={{ fontSize:13 }}>On a vent</span></label></L>
+        {anyPastChange && (
+          <div style={{ marginTop:12, fontSize:12, color:BRAND.ink, background:BRAND.paper, border:`1px solid ${BRAND.line}`, borderRadius:8, padding:"8px 10px" }}>
+            <div style={{ fontWeight:600, marginBottom:4 }}>This will change:</div>
+            {statusChanged && (()=>{ const p=fwd("status",f.status); return <div>• Status → <b>{f.status}</b>{p?` for ${p.count} day(s)${p.stopBefore?` (until the next change on ${p.stopBefore})`:", through today"}`:""}</div>; })()}
+            {payerChanged && (()=>{ const p=fwd("payer",f.payer); return <div>• Payer → <b>{payerName(f.payer)}</b>{p?` for ${p.count} day(s)${p.stopBefore?` (until the next change on ${p.stopBefore})`:", through today"}`:""}</div>; })()}
+            {ventChanged && (()=>{ const p=fwd("vent",f.vent); return <div>• Vent → <b>{f.vent?"On":"Off"}</b>{p?` for ${p.count} day(s)${p.stopBefore?` (until the next change on ${p.stopBefore})`:", through today"}`:""}</div>; })()}
+          </div>
+        )}
+        <div style={{height:16}} />
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button disabled={!anyPastChange} onClick={()=>onSave({ ...f, _ventChanged:ventChanged, _payerFwd:payerChanged, _statusChanged:statusChanged })} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:anyPastChange?BRAND.ink:"#aaa" }}>Apply correction</button>
+        </div>
+      </Overlay>
+    );
+  }
+
   return (
     <Overlay>
       <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:4 }}>Edit resident</div>
@@ -1232,7 +1681,6 @@ function EditResidentModal({ resident, onCancel, onSave }){
     </Overlay>
   );
 }
-
 function ShuffleModal({ seedId, beds, onCancel, onApply }){
   // Each row: { fromId (resident/bed being moved), toId (destination bed) }.
   // Rule: choosing an OCCUPIED destination auto-adds a row for the bumped resident.
@@ -1354,6 +1802,7 @@ function RehospModule({ facility }) {
   const [res, setRes] = useBedboard(facility.name);
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
+  const [eventWarn, setEventWarn] = useState(null);
   const applyStatus = (id, status, detail) => {
     setRes((rs) => rs.map((r) => {
       if (r.id !== id) return r;
@@ -1373,6 +1822,14 @@ function RehospModule({ facility }) {
   res.forEach((r) => {
     (r.hospLog || []).forEach((h, i) => events.push({ key: r.id + "-log-" + i, r, hosp: h, current: false }));
     if (r.hosp && r.hosp.date) events.push({ key: r.id + "-now", r, hosp: r.hosp, current: r.status === "Hospitalization" });
+  });
+  // Residents who LEFT their bed: their hospitalization history stays visible, and a
+  // no-bedhold/no-return hospitalization shows as Discharged with no status dropdown.
+  bedboardStore.getLeft(facility.name).forEach((p) => {
+    const asR = { ...p, status: p.leftReason === "Hospitalization" ? "Discharged" : p.leftReason };
+    (p.hospLog || []).forEach((h, i) => events.push({ key: p.id + "-log-" + i, r: asR, hosp: h, current: false }));
+    if (p.leftReason === "Hospitalization") events.push({ key: p.id + "-gone", r: asR, hosp: { ...(p.leftDetail || {}), date: p.leftDate }, current: false });
+    else if (p.hosp && p.hosp.date) events.push({ key: p.id + "-last", r: asR, hosp: p.hosp, current: false });
   });
   events.sort((a, b) => (b.hosp.date || "").localeCompare(a.hosp.date || "") || (b.hosp.time || "").localeCompare(a.hosp.time || ""));
   const current = events.filter((e) => e.current);
@@ -1485,7 +1942,35 @@ function RehospModule({ facility }) {
       )}
       {modal && <EventModal spec={modal} resident={res.find((r) => r.id === modal.id)}
         onCancel={() => setModal(null)}
-        onConfirm={(detail) => { applyStatus(modal.id, modal.status, detail); setModal(null); }} />}
+        onConfirm={(detail) => {
+          const isTerminal = TERMINAL.includes(modal.status);
+          const isHospGone = modal.status==="Hospitalization" && detail.bedhold!=="Y" && detail.expectedReturn!=="Y";
+          const runEvent = () => {
+            if (isTerminal) { bedboardStore.moveToLeft(facility.name, modal.id, modal.status, detail); toast("Recorded. Resident moved to the " + (modal.status==="Deceased"?"deceased":"discharged") + " list; bed freed."); }
+            else if (isHospGone) { bedboardStore.moveToLeft(facility.name, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
+            else applyStatus(modal.id, modal.status, detail);
+            setModal(null); setEventWarn(null);
+          };
+          if ((isTerminal || isHospGone) && detail.date && detail.date < todayISO()) {
+            const acts = bedboardStore.laterActivity(facility.name, modal.id, detail.date);
+            if (acts.length) { setEventWarn({ acts, run: runEvent, date: detail.date }); return; }
+          }
+          runEvent();
+        }} />}
+      {eventWarn && <Overlay>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>Heads up — later activity exists</div>
+        <div style={{ fontSize:13, color:BRAND.ink, marginBottom:10, lineHeight:1.5 }}>
+          You're recording this as of <b>{eventWarn.date}</b>, but this resident has activity after that date:
+        </div>
+        <ul style={{ fontSize:13, color:BRAND.ink, marginBottom:12, paddingLeft:18, lineHeight:1.6 }}>
+          {eventWarn.acts.map((a,i)=><li key={i}>{a}</li>)}
+        </ul>
+        <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:14 }}>Proceeding removes them from the board from {eventWarn.date} forward. Their RFMS and Rentals records are kept.</div>
+        <div className="flex justify-end gap-2">
+          <button onClick={()=>setEventWarn(null)} className="text-sm rounded-md px-3 py-1.5" style={{ border:`1px solid ${BRAND.line}` }}>Cancel</button>
+          <button onClick={eventWarn.run} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>OK — proceed</button>
+        </div>
+      </Overlay>}
     </div>
   );
 }
@@ -1518,7 +2003,16 @@ function RFMSModule({ facility, canSign }) {
   const [filter, setFilter] = useState("all");
   const [spendFor, setSpendFor] = useState(null);
 
-  const accounts = res.filter((r) => r.name && r.status !== "Available" && r.status !== "Blocked");
+  const leftPeople = bedboardStore.getLeft(facility.name).map(p => ({
+    ...p, _left: true,
+    status: p.leftReason === "Hospitalization" ? "Discharged" : p.leftReason,
+    disc: p.leftReason === "Deceased" ? (p.disc || {}) : { ...(p.leftDetail || {}), date: p.leftDate },
+    death: p.leftReason === "Deceased" ? { ...(p.leftDetail || {}), date: p.leftDate } : (p.death || {}),
+  }));
+  const accounts = [
+    ...res.filter((r) => r.name && r.status !== "Available" && r.status !== "Blocked"),
+    ...leftPeople,
+  ];
   const rows = accounts.map((r) => {
     const bal = num(r.trust);
     const refund = rfmsRefund(r);
@@ -1540,16 +2034,23 @@ function RFMSModule({ facility, canSign }) {
   const shown = filter === "open" ? open : filter === "closed" ? closing : rows;
   const dim = daysLeftInMonth();
 
-  const setTrust = (id, v) => setRes((rs) => rs.map((x) => (x.id === id ? { ...x, trust: v } : x)));
-  const commitTrust = (id) => setRes((rs) => rs.map((x) => {
-    if (x.id !== id) return x;
+  const isLeftId = (id) => leftPeople.some((p) => p.id === id);
+  const setTrust = (id, v) => {
+    if (isLeftId(id)) { bedboardStore.updateLeft(facility.name, id, (p) => ({ ...p, trust: v })); return; }
+    setRes((rs) => rs.map((x) => (x.id === id ? { ...x, trust: v } : x)));
+  };
+  const _commitTrustRow = (x) => {
     const bal = num(x.trust);
     if (bal == null) return x;
     const h = x.trustHistory || [];
     const last = h[h.length - 1];
     if (last && Number(last.amount) === bal) return x;
     return { ...x, trustHistory: [...h, { date: todayISO(), amount: bal }] };
-  }));
+  };
+  const commitTrust = (id) => {
+    if (isLeftId(id)) { bedboardStore.updateLeft(facility.name, id, _commitTrustRow); return; }
+    setRes((rs) => rs.map((x) => (x.id === id ? _commitTrustRow(x) : x)));
+  };
   const exportSpendLog = () => {
     const out = [["Resident", "Room", "Date", "Spent on", "Amount ($)", "Admin sign-off", "In balance"]];
     accounts.forEach((r) => (r.spend || []).forEach((e) => out.push([r.name, r.room, e.date, e.desc, num(e.amount) || 0, e.signedBy || "Awaiting sign-off", e.inBalance ? "Yes" : "No"])));
@@ -1675,11 +2176,11 @@ function RFMSModule({ facility, canSign }) {
 
       {spendFor && <SpendDownModal
         canSign={canSign}
-        resident={res.find((r) => r.id === spendFor)}
+        resident={accounts.find((r) => r.id === spendFor)}
         onClose={() => setSpendFor(null)}
-        onReconcile={() => setRes((rs) => rs.map((x) => (x.id === spendFor ? { ...x, spend: (x.spend || []).map((e) => ({ ...e, inBalance: true })) } : x)))}
-        onAdd={(entry) => setRes((rs) => rs.map((x) => (x.id === spendFor ? { ...x, spend: [...(x.spend || []), entry] } : x)))}
-        onSign={(entryId, name) => setRes((rs) => rs.map((x) => (x.id === spendFor ? { ...x, spend: (x.spend || []).map((e) => (e.id === entryId ? { ...e, signedBy: name } : e)) } : x)))}
+        onReconcile={() => { const up = (x) => ({ ...x, spend: (x.spend || []).map((e) => ({ ...e, inBalance: true })) }); if (isLeftId(spendFor)) bedboardStore.updateLeft(facility.name, spendFor, up); else setRes((rs) => rs.map((x) => (x.id === spendFor ? up(x) : x))); }}
+        onAdd={(entry) => { const up = (x) => ({ ...x, spend: [...(x.spend || []), entry] }); if (isLeftId(spendFor)) bedboardStore.updateLeft(facility.name, spendFor, up); else setRes((rs) => rs.map((x) => (x.id === spendFor ? up(x) : x))); }}
+        onSign={(entryId, name) => { const up = (x) => ({ ...x, spend: (x.spend || []).map((e) => (e.id === entryId ? { ...e, signedBy: name } : e)) }); if (isLeftId(spendFor)) bedboardStore.updateLeft(facility.name, spendFor, up); else setRes((rs) => rs.map((x) => (x.id === spendFor ? up(x) : x))); }}
       />}
     </div>
   );
@@ -2501,7 +3002,13 @@ function Dashboard({ data, onOpen }) {
     return [["Currently out", out.length, out.length ? "warn" : "ok"], ["Bedholds", holds], ["Returned (session)", ret]];
   })();
   const rfmsStats = (() => {
-    const accts = bbAll.filter((r) => r.name && r.status !== "Available" && r.status !== "Blocked");
+    const leftAll = FACILITIES.flatMap((f) => bedboardStore.getLeft(f.name)).map((p) => ({
+      ...p,
+      status: p.leftReason === "Hospitalization" ? "Discharged" : p.leftReason,
+      disc: p.leftReason === "Deceased" ? (p.disc || {}) : { ...(p.leftDetail || {}), date: p.leftDate },
+      death: p.leftReason === "Deceased" ? { ...(p.leftDetail || {}), date: p.leftDate } : (p.death || {}),
+    }));
+    const accts = [...bbAll.filter((r) => r.name && r.status !== "Available" && r.status !== "Blocked"), ...leftAll];
     const refunds = accts.filter((r) => TERMINAL.includes(r.status));
     const late = refunds.filter((r) => { const rf = rfmsRefund(r); return rf && rf.left <= 0; }).length;
     const over = accts.filter((r) => (num(r.trust) || 0) > RFMS_LIMIT).length;
@@ -2587,7 +3094,7 @@ function Facility({ facility, module, setModule, data, update, role, allowedPage
       {module === "rentals" && <Rentals facility={facility} data={data} update={update} />}
       {module === "roster" && <RosterModule key={facility.id} facility={facility} data={data} update={update} />}
       {module === "budget" && <DeptBudgetModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
-      {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} />}
+      {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} isAdmin={role === "admin"} />}
       {module === "rehosp" && <RehospModule key={facility.id} facility={facility} />}
       {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || role === "corporate"} />}
       {module === "staffing" && <StaffingModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
@@ -2603,14 +3110,22 @@ function Rentals({ facility, data, update }) {
   const [bbRes] = useBedboard(facility.name);
   const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim().split(/\s+/).sort().join(" ");
   const statusByName = {};
-  bbRes.forEach((r) => { if (r.name) statusByName[nameKey(r.name)] = r.status; });
+  const statusById = {};
+  bbRes.forEach((r) => { if (r.name) { statusByName[nameKey(r.name)] = r.status; if (r.residentId) statusById[r.residentId] = r.status; } });
+  // Residents who LEFT their bed (discharged/deceased/hosp-gone) still matter here:
+  // their rentals should flag for return. Hosp-gone counts as Discharged.
+  bedboardStore.getLeft(facility.name).forEach((p) => {
+    const st = p.leftReason === "Hospitalization" ? "Discharged" : p.leftReason;
+    if (p.name) statusByName[nameKey(p.name)] = st;
+    statusById[p.id] = st;
+  });
   const recFor = (it) => {
     const d = derive(it);
     if (RENT_CLOSED.includes(rentStatusOf(it))) return { ...d, rec: "done" };
-    const st = statusByName[nameKey(it.resident)];
+    const st = (it.residentId && statusById[it.residentId]) || statusByName[nameKey(it.resident)];
     return TERMINAL.includes(st) ? { ...d, rec: "gone" } : d;
   };
-  const censusResidents = bbRes.filter((r) => r.name && !TERMINAL.includes(r.status) && r.status !== "Available" && r.status !== "Blocked").map((r) => ({ name: r.name, room: r.room }));
+  const censusResidents = bbRes.filter((r) => r.name && !TERMINAL.includes(r.status) && r.status !== "Available" && r.status !== "Blocked").map((r) => ({ name: r.name, room: r.room, residentId: r.residentId }));
   const activeItems = items.filter((it) => !RENT_CLOSED.includes(rentStatusOf(it)));
   const closedItems = items.filter((it) => RENT_CLOSED.includes(rentStatusOf(it)));
   const monthly = activeItems.reduce((a, it) => a + (derive(it).m || 0), 0);
@@ -2673,7 +3188,7 @@ function Rentals({ facility, data, update }) {
 }
 
 function RentalModal({ item, residents = [], onClose, onSave, onDelete }) {
-  const [f, setF] = useState({ id: item.id, resident: item.resident || "", room: item.room || "", status: rentStatusOf(item),
+  const [f, setF] = useState({ id: item.id, resident: item.resident || "", residentId: item.residentId || null, room: item.room || "", status: rentStatusOf(item),
     equipment: item.equipment || "", category: item.category || "Mattress/Bed", startDate: item.startDate || "",
     daily: item.daily ?? "", monthly: item.monthly ?? "", purchase: item.purchase ?? "", comments: item.comments || "" });
   const inList = residents.some((r) => r.name === f.resident);
@@ -2684,7 +3199,8 @@ function RentalModal({ item, residents = [], onClose, onSave, onDelete }) {
     if (v === "__manual") { setManual(true); return; }
     setManual(false);
     const hit = residents.find((r) => r.name === v);
-    setF((p) => ({ ...p, resident: v, room: hit ? hit.room : p.room }));
+    // Store the permanent resident ID with the rental — renames can no longer break the link.
+    setF((p) => ({ ...p, resident: v, room: hit ? hit.room : p.room, residentId: hit ? hit.residentId : p.residentId }));
   };
   const clean = { ...f, daily: num(f.daily), monthly: num(f.daily) != null ? null : num(f.monthly), purchase: num(f.purchase), equipment: f.equipment.trim() };
   const d = derive(clean), r = RENTAL_REC[d.rec];
