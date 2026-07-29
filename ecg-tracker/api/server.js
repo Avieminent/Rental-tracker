@@ -245,6 +245,13 @@ app.post("/api/records", authenticate, wrap(async (req, res) => {
   auditReq(req, "create", { facilityId, recordId: rows[0].id, module, detail: collection });
 }));
 
+app.get("/api/records/:id", authenticate, wrap(async (req, res) => {
+  const { rows } = await pool.query("select id, facility_id, module, collection, data from record where id = $1", [req.params.id]);
+  if (!rows[0]) throw httpError(404, "Record not found.");
+  assertFacility(req.user, rows[0].facility_id);
+  res.json({ id: String(rows[0].id), facilityId: rows[0].facility_id, module: rows[0].module, collection: rows[0].collection, data: rows[0].data });
+}));
+
 app.patch("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select facility_id, module, collection from record where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Record not found.");
