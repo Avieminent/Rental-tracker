@@ -1212,9 +1212,11 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
       const st = STATUS[r.status] || STATUS.Available;
       return { st, shown: (r.name || "(no name)") + "  ·  left " + (r.leftDate || ""), freed: false };
     }
-    const freed = TERMINAL.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn!=="Y");
+    const reserved = r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y";
+    const freed = TERMINAL.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && !reserved);
     const st = freed ? STATUS.Available : (STATUS[r.status] || STATUS.Available);
-    const shown = (freed || r.status==="Available" || r.status==="Blocked") ? "—" : r.name;
+    const shown = reserved ? (r.name + "  ·  no bedhold — expected to return")
+      : (freed || r.status==="Available" || r.status==="Blocked") ? "—" : r.name;
     return { st, shown, freed };
   };
 
@@ -1345,7 +1347,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                           </td>
                           <td className="px-2 py-1.5" style={{ fontSize:12, color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{r.payer || "—"}</td>
                           <td className="px-1 py-1">
-                            <select disabled={viewing || r._left} value={r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
+                            <select disabled={viewing || r._left || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y")} title={(r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y")?"Bed reserved — change this status from the Rehosp page":""} value={r.status} onChange={e=>setStatus(r.id,e.target.value)} style={{ fontSize:12, width:"110px", padding:"3px 4px", borderRadius:6, border:`1px solid ${BRAND.line}`, opacity:(viewing||r._left)?0.7:1 }}>
                               {STATUS_LIST.map(s=><option key={s} value={s}>{s}</option>)}
                             </select>
                           </td>
@@ -1410,6 +1412,9 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             else if (isHospGone) { bedboardStore.moveToLeft(facility, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
             else {
               applyStatus(modal.id, modal.status, detail);
+              // No bedhold + expected to return: they're out of the building — vent is automatically No.
+              if (modal.status === "Hospitalization" && detail.bedhold !== "Y" && detail.expectedReturn === "Y")
+                setRes(rs => rs.map(x => x.id === modal.id ? { ...x, vent: false } : x));
               // Backdated hospitalization that keeps the bed (bedhold / expected return):
               // also mark the past days so the board on those dates shows them out.
               if (modal.status === "Hospitalization" && detail.date && detail.date < todayISO())
@@ -2136,6 +2141,8 @@ function RehospModule({ facility }) {
             else if (isHospGone) { bedboardStore.moveToLeft(facility.name, modal.id, "Hospitalization", detail); toast("Recorded. No bedhold and not expected to return — bed freed; resident kept in RFMS and Rentals."); }
             else {
               applyStatus(modal.id, modal.status, detail);
+              if (modal.status === "Hospitalization" && detail.bedhold !== "Y" && detail.expectedReturn === "Y")
+                setRes(rs => rs.map(x => x.id === modal.id ? { ...x, vent: false } : x));
               if (modal.status === "Hospitalization" && detail.date && detail.date < todayISO())
                 bedboardStore.backdateStatusDays(facility.name, modal.id, detail.date, { status: "Hospitalization", hosp: { ...detail } });
             }
