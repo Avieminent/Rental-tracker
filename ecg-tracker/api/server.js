@@ -289,7 +289,7 @@ app.patch("/api/facilities/:fid", authenticate, wrap(async (req, res) => {
 
 /* ---------- login management (admin only) ---------- */
 const ROLES = ["admin", "corporate", "facility"];
-const PAGE_KEYS = ["roster", "census", "rehosp", "rfms", "staffing", "budget", "rentals"];
+const PAGE_KEYS = ["roster", "census", "rehosp", "rfms", "staffing", "budget", "rentals", "rfms:sign"]; // rfms:sign = permission to sign RFMS spend-downs
 const cleanPages = (v) => Array.isArray(v) ? v.filter((k) => PAGE_KEYS.includes(k)) : null;
 const toUser = (r) => ({ id: r.id, email: r.email, role: r.role, facilityId: r.facility_id, facilityName: r.facility_name || null, pages: r.pages || null });
 
@@ -316,7 +316,7 @@ app.post("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   if (!email || !String(email).trim()) throw httpError(400, "Email is required.");
   if (!password || String(password).length < 8) throw httpError(400, "Password must be at least 8 characters.");
   const fid = roleScope(role, facilityId);
-  const pageList = role === "facility" ? cleanPages(pages) : null; // null = all pages
+  const pageList = role === "admin" ? null : cleanPages(pages); // admin: all pages; facility/corporate: their list (may carry rfms:sign)
   const hash = await bcrypt.hash(String(password), 10);
   let rows;
   try {
