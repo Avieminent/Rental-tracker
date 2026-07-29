@@ -1739,7 +1739,10 @@ function PayerChanges({ res, facility }){
   res.forEach(r => (r.payerLog||[]).forEach(pushLog(r)));
   // departed residents' change history stays visible too
   bedboardStore.getLeft(facility).forEach(p => (p.payerLog||[]).forEach(pushLog(p)));
-  changes.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
+  // The box shows only TODAY's activity: anything logged today (effective today or backfilled).
+  const _today = todayISO();
+  const todaysChanges = changes.filter(c => (c.loggedDate || c.date) === _today);
+  todaysChanges.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
   const exportChanges = () => {
     const out = [["Effective date","Logged on","Type","Resident","Room","From","To"]];
     changes.forEach(c => out.push([c.date, c.loggedDate||c.date, c.kind==="vent"?"Vent":c.kind==="status"?"Status":"Payer", c.name, c.room, (c.kind==="vent"||c.kind==="status")?c.from:payerName(c.from), (c.kind==="vent"||c.kind==="status")?c.to:payerName(c.to)]));
@@ -1752,9 +1755,9 @@ function PayerChanges({ res, facility }){
         <button onClick={exportChanges} disabled={!changes.length} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", color:changes.length?BRAND.ink:"#bbb", cursor:changes.length?"pointer":"default" }}>Export</button>
       </div>
       <div style={{ maxHeight:260, overflowY:"auto" }}>
-        {changes.length===0 ? (
-          <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>No payer changes recorded yet. When you change a resident's payer, it's logged here with its effective date.</div>
-        ) : changes.map((c,i)=>(
+        {todaysChanges.length===0 ? (
+          <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>No changes logged today yet. When you change a resident's payer, it's logged here with its effective date.</div>
+        ) : todaysChanges.map((c,i)=>(
           <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none" }}>
             <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
             <div style={{ fontSize:12, color:BRAND.inkSoft }}>
