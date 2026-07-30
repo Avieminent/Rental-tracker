@@ -1146,7 +1146,11 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     const mix = {};
     rows.forEach(r => { if (!r._left && r.payer && holdsBed(r)) mix[r.payer] = (mix[r.payer] || 0) + 1; });
     const payerMix = Object.entries(mix).sort((a, b) => b[1] - a[1]);
-    return { hosp, discharges, deaths, changes, payerMix };
+    const admissions = rows.filter(r => !r._left && r.status === "Admitting").map(r => ({ name: r.name || "(new)", mf: r.mf || "", payer: r.payer || "", room: r.room }));
+    let cm = 0, cf = 0, cv = 0;
+    rows.forEach(r => { if (r._left) return; if (IN_FACILITY.includes(r.status)) { if (r.mf === "M") cm++; if (r.mf === "F") cf++; } if (r.vent) cv++; });
+    const census = [["Male", cm], ["Female", cf], ["Vent", cv]];
+    return { hosp, discharges, deaths, changes, payerMix, admissions, pending: [], census };
   };
 
   const exportBoard = async () => {
@@ -1270,9 +1274,11 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   const migNote = bedboardStore.migrationNote ? bedboardStore.migrationNote[facility] : null;
   const inHospital = displayRes.filter(r => r.status==="Hospitalization");
   const _left = bedboardStore.getLeft(facility);
-  // Today's activity only: discharges LOGGED today (including ones backfilled to an earlier date — shown amber)
-  const discharges = _left.filter(p => p.leftReason==="Discharged" && p.leftLogged===todayISO()).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftDate!==p.leftLogged, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
-  const deaths     = _left.filter(p => p.leftReason==="Deceased" && p.leftLogged===todayISO()).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: p.leftDate!==p.leftLogged, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
+  // Date-aware boxes: viewing today = today's LOGGED activity (incl. backfills, amber);
+  // viewing a past date = who actually left ON that day (amber if it was logged late).
+  const _boxMatch = (p) => viewing ? p.leftDate === viewDate : p.leftLogged === todayISO();
+  const discharges = _left.filter(p => p.leftReason==="Discharged" && _boxMatch(p)).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: !!p.leftLogged && p.leftDate!==p.leftLogged, disc:{ date:p.leftDate, dischargedTo:p.leftDetail?.dischargedTo } }));
+  const deaths     = _left.filter(p => p.leftReason==="Deceased" && _boxMatch(p)).slice().reverse().map(p => ({ name:p.name, room:p.room, hl: !!p.leftLogged && p.leftDate!==p.leftLogged, death:{ date:p.leftDate, cause:p.leftDetail?.cause } }));
 
   // bed frees for: discharged/deceased, and hospitalization with NO bedhold
   const wingRow = (r) => {
@@ -1435,7 +1441,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           <div className="flex flex-col gap-3">
             <Legend res={displayRes} />
             <CensusTiles counts={counts} />
-            <PayerChanges res={res} facility={facility} />
+            <PayerChanges res={res} facility={facility} viewDate={viewing ? viewDate : null} />
             <ColorKey />
             <Section title="Activity report — today" cols={["Name","Time","Type","Room","Payer"]}
               rows={activity(res)} />
@@ -1911,6 +1917,12 @@ async function buildBedboardWorkbook(facilityName, iso, rows, counts, boxes) {
     boxRows(["Name","Room","Date","Cause"], (boxes.deaths||[]).map(x=>[x.name,x.room,x.date,x.cause,x.hl]), 4);
     boxHeader("Payer / vent / status changes — " + iso);
     boxRows(["Name","Change","Effective","Logged"], (boxes.changes||[]).map(x=>[x.name, `${x.kind==="vent"?"Vent ":x.kind==="status"?"Status ":""}${x.from||"—"} → ${x.to||"—"}`, x.date, x.loggedDate, x.hl]), 4);
+    boxHeader("Admissions");
+    boxRows(["Name","M/F","Payer","Room"], (boxes.admissions||[]).map(x=>[x.name,x.mf,x.payer,x.room]));
+    boxHeader("Pending discharges");
+    boxRows(["Name","Room","Target","To"], (boxes.pending||[]));
+    boxHeader("Census");
+    boxRows(["","Count","",""], (boxes.census||[]).map(([k,v])=>[k, v, "", ""]));
     boxHeader("Payer mix");
     boxRows(["Payer","Count","",""], (boxes.payerMix||[]).map(([k,v])=>[k, v, "", ""]));
   }
@@ -2053,7 +2065,7 @@ function AddModal({ openBeds, backfillDate, genderConflict, onAdd, onCancel }){
   );
 }
 
-function PayerChanges({ res, facility }){
+function PayerChanges({ res, facility, viewDate }){
   const payerName=(c)=>{ const hit=PAYERS.find(([n,code])=>code===c); return hit?hit[0]:(c||"—"); };
   // Flatten every resident's payerLog into one dated list, newest first.
   const changes = [];
@@ -2061,9 +2073,10 @@ function PayerChanges({ res, facility }){
   res.forEach(r => (r.payerLog||[]).forEach(pushLog(r)));
   // departed residents' change history stays visible too
   bedboardStore.getLeft(facility).forEach(p => (p.payerLog||[]).forEach(pushLog(p)));
-  // The box shows only TODAY's activity: anything logged today (effective today or backfilled).
+  // Viewing today: anything LOGGED today (effective today or backfilled).
+  // Viewing a past date: changes EFFECTIVE that day (amber if logged late).
   const _today = todayISO();
-  const todaysChanges = changes.filter(c => (c.loggedDate || c.date) === _today);
+  const todaysChanges = changes.filter(c => viewDate ? c.date === viewDate : (c.loggedDate || c.date) === _today);
   todaysChanges.sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.loggedDate||"").localeCompare(a.loggedDate||""));
   const exportChanges = () => {
     const out = [["Effective date","Logged on","Backfilled","Type","Resident","Room","From","To"]];
@@ -2078,7 +2091,7 @@ function PayerChanges({ res, facility }){
       </div>
       <div style={{ maxHeight:260, overflowY:"auto" }}>
         {todaysChanges.length===0 ? (
-          <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>No changes logged today yet. When you change a resident's payer, it's logged here with its effective date.</div>
+          <div style={{ fontSize:12, color:BRAND.inkSoft, padding:"12px 12px" }}>{viewDate ? "No payer, vent or status changes on this day." : "No changes logged today yet. When you change a resident's payer, vent or status, it's logged here with both dates."}</div>
         ) : todaysChanges.map((c,i)=>(
           <div key={i} style={{ padding:"8px 12px", borderTop: i?`1px solid ${BRAND.lineSoft}`:"none", background: (c.loggedDate && c.date!==c.loggedDate) ? "#fdf4dd" : "transparent" }}>
             <div style={{ fontSize:13, color:BRAND.ink }}>{c.name || "(no name)"} <span style={{ color:BRAND.inkSoft }}>· {c.room}</span></div>
