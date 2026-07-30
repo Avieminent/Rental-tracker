@@ -1114,7 +1114,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     setSendingDone(true);
     try {
       const iso = todayISO();
-      const wb = await buildBedboardWorkbook(facility, iso, res, counts);
+      const wb = await buildBedboardWorkbook(facility, iso, res, counts, boxesFor(iso, res));
       const buf = await wb.xlsx.writeBuffer();
       let bin = ""; const bytes = new Uint8Array(buf);
       for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -1130,12 +1130,31 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     } catch (e) { toast(e.message || "The email could not be sent."); }
     setSendingDone(false);
   };
-const exportBoard = async () => {
+// The side boxes for a given day's sheet: what happened ON that day (with amber for backfills).
+  const boxesFor = (iso, rows) => {
+    const left = bedboardStore.getLeft(facility);
+    const hosp = rows.filter(r => !r._left && r.status === "Hospitalization")
+      .map(r => ({ name: r.name, room: r.room, date: r.hosp?.date || "", bedhold: r.hosp?.bedhold === "Y" ? "Y" : "N" }));
+    const discharges = left.filter(p => p.leftReason === "Discharged" && p.leftDate === iso)
+      .map(p => ({ name: p.name, room: p.room, date: p.leftDate, to: p.leftDetail?.dischargedTo || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
+    const deaths = left.filter(p => p.leftReason === "Deceased" && p.leftDate === iso)
+      .map(p => ({ name: p.name, room: p.room, date: p.leftDate, cause: p.leftDetail?.cause || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
+    const changes = [];
+    const scan = (r, nm, rm) => (r.payerLog || []).forEach(c => { if (c.date === iso) changes.push({ name: nm, room: rm, kind: c.kind || "payer", from: c.from, to: c.to, date: c.date, loggedDate: c.loggedDate || c.date, hl: c.loggedDate && c.loggedDate !== c.date }); });
+    res.forEach(r => r.name && scan(r, r.name, r.room));
+    left.forEach(p => scan(p, p.name, p.room));
+    const mix = {};
+    rows.forEach(r => { if (!r._left && r.payer && holdsBed(r)) mix[r.payer] = (mix[r.payer] || 0) + 1; });
+    const payerMix = Object.entries(mix).sort((a, b) => b[1] - a[1]);
+    return { hosp, discharges, deaths, changes, payerMix };
+  };
+
+  const exportBoard = async () => {
     const iso = viewing ? viewDate : todayISO();
     const rows = displayRes;
     if (!rows || !rows.length) { toast(`No census data to export for ${iso}.`); return; }
     try {
-      const wb = await buildBedboardWorkbook(facility, iso, rows, counts);
+      const wb = await buildBedboardWorkbook(facility, iso, rows, counts, boxesFor(iso, rows));
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const a = document.createElement("a");
@@ -1776,7 +1795,7 @@ function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCa
 
 // Build the Daily Bed Board as a styled Excel workbook (visual only — plain values, no formulas),
 // mirroring the original facility bedboard layout: title, count tiles, wings side by side.
-async function buildBedboardWorkbook(facilityName, iso, rows, counts) {
+async function buildBedboardWorkbook(facilityName, iso, rows, counts, boxes) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Bed Board", { views: [{ showGridLines: false }] });
   const TINT = { Available:"FFFFFFFF", Active:"FFFFFFFF", Admitting:"FFEAF2FB", "Room Move":"FFF3EEE4", "COVID+":"FFFDECEB", Iso:"FFFDECEB", Hospitalization:"FFFDF4DD", Discharged:"FFEEF0F3", Deceased:"FFEEF0F3", Blocked:"FFF1F1F1" };
@@ -1784,6 +1803,8 @@ async function buildBedboardWorkbook(facilityName, iso, rows, counts) {
   const thin = { style:"thin", color:{ argb: LINE } };
   const border = { top:thin, bottom:thin, left:thin, right:thin };
 
+  // Right-side boxes land in columns 15-18.
+  [22, 14, 12, 12].forEach((w, i) => { ws.getColumn(15 + i).width = w; });
   // Wings side by side, two per band, 6 columns each + a gap column.
   const wings = {};
   rows.forEach(r => { (wings[r.wing] = wings[r.wing] || []).push(r); });
@@ -1854,6 +1875,44 @@ async function buildBedboardWorkbook(facilityName, iso, rows, counts) {
       bandBottom = Math.max(bandBottom, bandRow + 1 + list.length);
     }
     bandRow = bandBottom + 2;
+  }
+
+  // ---- Side boxes (relevant to the exported day) ----
+  if (boxes) {
+    const AMBER = "FFFDF4DD", HEAD = "FFF6F1E7";
+    let br = 7;
+    const boxHeader = (title) => {
+      ws.mergeCells(br, 15, br, 18);
+      const h = ws.getCell(br, 15);
+      h.value = title; h.font = { name:"Georgia", size:11, bold:true, color:{ argb: INK } };
+      h.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: HEAD } };
+      br++;
+    };
+    const boxRows = (cols, list, hlAt) => {
+      cols.forEach((cn, ci) => { const c = ws.getCell(br, 15+ci); c.value = cn; c.font = { name:"Arial", size:8, bold:true, color:{ argb: SOFT } }; c.border = border; });
+      br++;
+      if (!list.length) { const c = ws.getCell(br, 15); c.value = "None"; c.font = { name:"Arial", size:9, italic:true, color:{ argb: SOFT } }; br++; }
+      list.forEach(vals => {
+        const hl = hlAt !== undefined && vals[hlAt];
+        vals.slice(0, 4).forEach((v, ci) => {
+          const c = ws.getCell(br, 15+ci);
+          c.value = v; c.font = { name:"Arial", size:9, color:{ argb: INK } }; c.border = border;
+          if (hl) c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: AMBER } };
+        });
+        br++;
+      });
+      br++; // gap
+    };
+    boxHeader("In hospital");
+    boxRows(["Name","Room","Since","Bedhold"], (boxes.hosp||[]).map(x=>[x.name,x.room,x.date,x.bedhold]));
+    boxHeader("Discharges — " + iso);
+    boxRows(["Name","Room","Date","To"], (boxes.discharges||[]).map(x=>[x.name,x.room,x.date,x.to,x.hl]), 4);
+    boxHeader("Deaths — " + iso);
+    boxRows(["Name","Room","Date","Cause"], (boxes.deaths||[]).map(x=>[x.name,x.room,x.date,x.cause,x.hl]), 4);
+    boxHeader("Payer / vent / status changes — " + iso);
+    boxRows(["Name","Change","Effective","Logged"], (boxes.changes||[]).map(x=>[x.name, `${x.kind==="vent"?"Vent ":x.kind==="status"?"Status ":""}${x.from||"—"} → ${x.to||"—"}`, x.date, x.loggedDate, x.hl]), 4);
+    boxHeader("Payer mix");
+    boxRows(["Payer","Count","",""], (boxes.payerMix||[]).map(([k,v])=>[k, v, "", ""]));
   }
   return wb;
 }
