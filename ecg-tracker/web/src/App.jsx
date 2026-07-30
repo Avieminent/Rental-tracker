@@ -2337,10 +2337,10 @@ function L({ label, children }){
   return (<label className="block"><span style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft }}>{label}</span><div className="mt-1">{children}</div></label>);
 }
 
-function Overlay({ children }){
+function Overlay({ children, wide, onBackdrop }){
   return (
-    <div style={{ minHeight:"100vh", position:"fixed", inset:0, zIndex:50, background:"rgba(20,25,40,.4)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"48px 16px", overflowY:"auto" }}>
-      <div className="rounded-xl w-full" style={{ maxWidth:440, background:"#fff", padding:20, border:`1px solid ${BRAND.line}` }}>{children}</div>
+    <div onClick={onBackdrop ? (e) => { if (e.target === e.currentTarget) onBackdrop(); } : undefined} style={{ minHeight:"100vh", position:"fixed", inset:0, zIndex:50, background:"rgba(20,25,40,.4)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"48px 16px", overflowY:"auto" }}>
+      <div className="rounded-xl w-full" style={{ maxWidth: wide ? 900 : 440, background:"#fff", padding:20, border:`1px solid ${BRAND.line}` }}>{children}</div>
     </div>
   );
 }
@@ -2351,9 +2351,88 @@ function Overlay({ children }){
 const bbDayOfWeek = (iso) => { if (!iso) return "—"; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? "—" : d.toLocaleDateString(undefined, { weekday: "long" }); };
 const bbShift = (hm) => { const h = parseInt(String(hm || "").slice(0, 2), 10); if (isNaN(h)) return "—"; if (h >= 7 && h < 15) return "Day (7a–3p)"; if (h >= 15 && h < 23) return "Evening (3p–11p)"; return "Night (11p–7a)"; };
 
+
+// Enlarged Patterns: visual graphs for hospitalization history (per facility).
+function PatternsModal({ facilityName, events, returned, current, onClose }){
+  const ym = (d) => (d || "").slice(0, 7);
+  const monthName = (k) => { const [y, m] = k.split("-"); return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m,10)-1] + " " + y.slice(2); };
+  const months = []; { const d = new Date(); d.setDate(1); for (let i = 11; i >= 0; i--) { const t = new Date(d.getFullYear(), d.getMonth() - i, 1); months.push(t.toISOString().slice(0, 7)); } }
+  const perMonth = months.map(k => ({ k, n: events.filter(r => ym(r.hosp?.date) === k).length }));
+  const shiftOf = (r) => bbShift(r.hosp.time).split(" (")[0];
+  const byShift = { Day: 0, Evening: 0, Night: 0 };
+  events.forEach(r => { if (byShift[shiftOf(r)] != null) byShift[shiftOf(r)]++; });
+  const outcomes = [
+    ["Returned", returned.length, "#3f7d4e"],
+    ["Still out", current.length, "#c8a24a"],
+    ["Discharged", events.filter(r => r.status === "Discharged").length, "#7a7a7a"],
+    ["Deceased", events.filter(r => r.status === "Deceased").length, "#a04545"],
+  ];
+  const totalEv = events.length || 1;
+  const avgPerMonth = months.map(k => {
+    const stays = returned.filter(r => ym(r.hosp?.returned) === k).map(r => diffDays(r.hosp.date, r.hosp.returned)).filter(d => d != null && d >= 0);
+    return { k, v: stays.length ? stays.reduce((a, b) => a + b, 0) / stays.length : null };
+  });
+  const maxN = Math.max(1, ...perMonth.map(x => x.n));
+  const maxAvg = Math.max(1, ...avgPerMonth.map(x => x.v || 0));
+  const maxShift = Math.max(1, ...Object.values(byShift));
+  const panel = { border:`1px solid ${BRAND.line}`, borderRadius:10, padding:"12px 14px" };
+  const cap = { fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft, marginBottom:10 };
+  const Bars = ({ data, max, color, fmt }) => (
+    <div style={{ display:"flex", alignItems:"flex-end", gap:4, height:120 }}>
+      {data.map((x, i) => (
+        <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
+          <span style={{ fontSize:9 }}>{x.v == null ? "" : (fmt ? fmt(x.v) : x.v) || ""}</span>
+          <div style={{ width:"100%", height: `${x.v == null ? 0 : Math.max(2, Math.round((x.v / max) * 100))}%`, background: x.hl ? "#c8a24a" : color, borderRadius:"3px 3px 0 0" }} />
+          <span style={{ fontSize:8, color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{x.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+  const HBar = ({ label, n, of, color }) => (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:3 }}><span>{label}</span><b>{n}{of != null ? ` · ${Math.round(n / of * 100)}%` : ""}</b></div>
+      <div style={{ height:10, background:"#f0ede6", borderRadius:5 }}><div style={{ width:`${Math.round((n / (of || maxShift)) * 100)}%`, height:"100%", background:color, borderRadius:5 }} /></div>
+    </div>
+  );
+  return (
+    <Overlay wide onBackdrop={onClose}>
+      <div className="flex items-center justify-between" style={{ marginBottom:4 }}>
+        <div style={{ fontFamily:BB_SERIF, fontSize:18 }}>Hospitalization patterns — {facilityName}</div>
+        <button onClick={onClose} style={{ color:BRAND.inkSoft, background:"none", border:"none", cursor:"pointer", fontSize:16 }}>✕</button>
+      </div>
+      <div style={{ fontSize:12, color:BRAND.inkSoft, marginBottom:14 }}>All recorded hospitalizations · last 12 months</div>
+      <div className="grid gap-4" style={{ gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))" }}>
+        <div style={panel}>
+          <div style={cap}>Hospitalizations per month</div>
+          <Bars data={perMonth.map((x,i)=>({ v:x.n||null, label:monthName(x.k), hl:i===perMonth.length-1 }))} max={maxN} color={BRAND.ink} />
+        </div>
+        <div style={panel}>
+          <div style={cap}>By shift</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:12, justifyContent:"center", height:120 }}>
+            <HBar label="Day" n={byShift.Day} color={BRAND.ink} />
+            <HBar label="Evening" n={byShift.Evening} color="#5b6b8c" />
+            <HBar label="Night" n={byShift.Night} color="#c8a24a" />
+          </div>
+        </div>
+        <div style={panel}>
+          <div style={cap}>Outcomes ({events.length} events)</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:9, justifyContent:"center", height:120 }}>
+            {outcomes.map(([l, n, c]) => <HBar key={l} label={l} n={n} of={totalEv} color={c} />)}
+          </div>
+        </div>
+        <div style={panel}>
+          <div style={cap}>Avg days out (returned) per month</div>
+          <Bars data={avgPerMonth.map(x=>({ v:x.v, label:monthName(x.k) }))} max={maxAvg} color="#5b6b8c" fmt={(v)=>v.toFixed(1)} />
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
 function RehospModule({ facility, isAdmin }) {
   const [res, setRes] = useBedboard(facility.name);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState("current"); // page opens on "currently at hospital"
+  const [patternsBig, setPatternsBig] = useState(false);
   const [modal, setModal] = useState(null);
   const [eventWarn, setEventWarn] = useState(null);
   const applyStatus = (id, status, detail, whenISO) => {
@@ -2438,8 +2517,13 @@ function RehospModule({ facility, isAdmin }) {
         const deaths = events.filter((r) => r.status === "Deceased").length;
         const rate = events.length ? Math.round((returned.length / events.length) * 100) : 0;
         return (
-          <div className="rounded-xl px-4 py-3 mb-5" style={{ background: BRAND.card, border: `1px solid ${BRAND.line}` }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: BRAND.inkSoft, marginBottom: 6 }}>Patterns (session)</div>
+          <div className="rounded-xl px-4 py-3 mb-5" role="button" title="Show graphs" onClick={() => setPatternsBig(true)}
+            onMouseEnter={(e)=>{ e.currentTarget.style.background = "#f3efe6"; }} onMouseLeave={(e)=>{ e.currentTarget.style.background = BRAND.card; }}
+            style={{ background: BRAND.card, border: `1px solid ${BRAND.line}`, cursor: "pointer" }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: BRAND.inkSoft }}>Patterns</div>
+              <div style={{ fontSize: 10, color: BRAND.inkSoft }}>tap for graphs</div>
+            </div>
             <div className="flex gap-5 flex-wrap" style={{ fontSize: 13 }}>
               <span>By shift: <b>{byShift.Day}</b> day · <b>{byShift.Evening}</b> evening · <b>{byShift.Night}</b> night</span>
               <span>Return rate: <b>{rate}%</b></span>
@@ -2495,6 +2579,7 @@ function RehospModule({ facility, isAdmin }) {
           </div>
         </div>
       )}
+      {patternsBig && <PatternsModal facilityName={facility.name} events={events} returned={returned} current={current} onClose={() => setPatternsBig(false)} />}
       {returnPrompt && <Overlay>
         <div style={{ fontFamily:BB_SERIF, fontSize:18, marginBottom:8 }}>When did this happen?</div>
         <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:10 }}>
