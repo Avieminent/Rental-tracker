@@ -2386,7 +2386,7 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
 
   // Bars: always draws a faint baseline per month so sparse data still reads as a timeline.
   const Bars = ({ data, max, color, fmt, height }) => (
-    <div style={{ display:"flex", alignItems:"flex-end", gap:4, height: height || 120 }}>
+    <div style={{ display:"flex", gap:4, height: height || 120 }}>
       {data.map((x, i) => (
         <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
           <span style={{ fontSize:9 }}>{x.v ? (fmt ? fmt(x.v) : x.v) : ""}</span>
@@ -2399,7 +2399,7 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
   const Stacked = ({ data, height }) => { // data: [{k, parts:[{l,c,n}]}]
     const max = Math.max(1, ...data.map(m => m.parts.reduce((s,p)=>s+p.n,0)));
     return (
-      <div style={{ display:"flex", alignItems:"flex-end", gap:4, height: height || 200 }}>
+      <div style={{ display:"flex", gap:4, height: height || 200 }}>
         {data.map((m, i) => { const tot = m.parts.reduce((s,p)=>s+p.n,0); return (
           <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
             <span style={{ fontSize:9 }}>{tot || ""}</span>
@@ -2415,7 +2415,7 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
   const Grouped = ({ data, height }) => { // data: shiftPerMonth
     const max = Math.max(1, ...data.flatMap(m => [m.Day, m.Evening, m.Night]));
     return (
-      <div style={{ display:"flex", alignItems:"flex-end", gap:6, height: height || 200 }}>
+      <div style={{ display:"flex", gap:6, height: height || 200 }}>
         {data.map((m, i) => (
           <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
             <div style={{ display:"flex", alignItems:"flex-end", gap:1, width:"100%", height:"100%" }}>
