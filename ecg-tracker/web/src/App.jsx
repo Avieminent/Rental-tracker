@@ -2398,31 +2398,16 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
       ))}
     </div>
   );
-  const Stacked = ({ data, height }) => { // data: [{k, parts:[{l,c,n}]}]
-    const max = Math.max(1, ...data.map(m => m.parts.reduce((s,p)=>s+p.n,0)));
-    return (
-      <div style={{ display:"flex", gap:4, height: height || 200 }}>
-        {data.map((m, i) => { const tot = m.parts.reduce((s,p)=>s+p.n,0); return (
-          <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
-            <span style={{ fontSize:9 }}>{tot || ""}</span>
-            <div style={{ width:"100%", height: tot ? `${Math.max(3, Math.round((tot / max) * 100))}%` : 2, display:"flex", flexDirection:"column-reverse", borderRadius:"3px 3px 0 0", overflow:"hidden", background: tot ? undefined : BRAND.lineSoft }}>
-              {m.parts.map((p, pi) => p.n > 0 && <div key={pi} style={{ height:`${(p.n / tot) * 100}%`, background:p.c }} />)}
-            </div>
-            <span style={{ fontSize:8, color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{monthName(m.k)}</span>
-          </div>
-        );})}
-      </div>
-    );
-  };
-  const Grouped = ({ data, height }) => { // data: shiftPerMonth
-    const max = Math.max(1, ...data.flatMap(m => [m.Day, m.Evening, m.Night]));
+
+  const Grouped = ({ data, height }) => { // data: [{k, series:[{l, n, c}]}] — side-by-side mini bars per month
+    const max = Math.max(1, ...data.flatMap(m => m.series.map(s => s.n)));
     return (
       <div style={{ display:"flex", gap:6, height: height || 200 }}>
         {data.map((m, i) => (
           <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"flex-end", alignItems:"center", gap:2, minWidth:0 }}>
             <div style={{ display:"flex", alignItems:"flex-end", gap:1, width:"100%", height:"100%" }}>
-              {["Day","Evening","Night"].map(sh => (
-                <div key={sh} title={`${sh}: ${m[sh]}`} style={{ flex:1, height: m[sh] ? `${Math.max(3, Math.round((m[sh]/max)*100))}%` : 2, background: m[sh] ? SHIFT_COLORS[sh] : BRAND.lineSoft, borderRadius:"2px 2px 0 0" }} />
+              {m.series.map((sr) => (
+                <div key={sr.l} title={`${sr.l}: ${sr.n}`} style={{ flex:1, height: sr.n ? `${Math.max(3, Math.round((sr.n/max)*100))}%` : 2, background: sr.n ? sr.c : BRAND.lineSoft, borderRadius:"2px 2px 0 0" }} />
               ))}
             </div>
             <span style={{ fontSize:8, color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{monthName(m.k)}</span>
@@ -2498,14 +2483,14 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
       )}
       {view === "shift" && (
         <div style={panel}>
-          <Grouped data={shiftPerMonth} height={240} />
+          <Grouped data={shiftPerMonth.map(m=>({ k:m.k, series:["Day","Evening","Night"].map(sh=>({ l:sh, n:m[sh], c:SHIFT_COLORS[sh] })) }))} height={240} />
           <Legend items={["Day","Evening","Night"].map(sh=>[`${sh} — ${byShiftTot[sh]} total`, SHIFT_COLORS[sh]])} />
           <div style={{ fontSize:12, color:BRAND.inkSoft, marginTop:8 }}>Three bars per month: which shift sent residents out. Spot patterns like night-shift spikes.</div>
         </div>
       )}
       {view === "outcomes" && (
         <div style={panel}>
-          <Stacked data={outPerMonth} height={240} />
+          <Grouped data={outPerMonth.map(m=>({ k:m.k, series:m.parts.map(p=>({ l:p.l, n:p.n, c:p.c })) }))} height={240} />
           <Legend items={outTot.map(o=>[`${o.l} — ${o.n} (${winTotal?Math.round(o.n/winTotal*100):0}%)`, o.c])} />
           <div style={{ fontSize:12, color:BRAND.inkSoft, marginTop:8 }}>Each month's events stacked by how they ended. "Still out" naturally concentrates in recent months.</div>
         </div>
