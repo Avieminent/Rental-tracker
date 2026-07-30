@@ -2363,11 +2363,13 @@ function PatternsModal({ facilityName, events, returned, current, onClose, initi
   const winLabel = `${monthName(months[0])} – ${monthName(months[11])}`;
   const shiftOf = (r) => bbShift(r.hosp.time).split(" (")[0];
   const SHIFT_COLORS = { Day: BRAND.ink, Evening: "#5b6b8c", Night: "#c8a24a" };
+  // Mirrors the page's own status logic exactly (event fields live on e.current / e.hosp / e.r).
+  const outcomeOf = (e) => e.current ? "Still out" : e.hosp?.returned ? "Returned" : e.r?.status === "Deceased" ? "Deceased" : e.r?.status === "Discharged" ? "Discharged" : "Returned";
   const OUT_DEFS = [
-    ["Returned", (r) => !!r.hosp?.returned, "#3f7d4e"],
-    ["Still out", (r) => !r.hosp?.returned && r.status === "Hospitalization", "#c8a24a"],
-    ["Discharged", (r) => r.status === "Discharged", "#7a7a7a"],
-    ["Deceased", (r) => r.status === "Deceased", "#a04545"],
+    ["Returned", (e) => outcomeOf(e) === "Returned", "#3f7d4e"],
+    ["Still out", (e) => outcomeOf(e) === "Still out", "#c8a24a"],
+    ["Discharged", (e) => outcomeOf(e) === "Discharged", "#7a7a7a"],
+    ["Deceased", (e) => outcomeOf(e) === "Deceased", "#a04545"],
   ];
   const inMonth = (k) => events.filter(r => ym(r.hosp?.date) === k);
   const perMonth = months.map(k => ({ k, n: inMonth(k).length }));
@@ -2578,7 +2580,10 @@ function RehospModule({ facility, isAdmin }) {
         <SearchJump placeholder="Search name, room, reason" items={shown.map(ev=>({ label:ev.r.name, sub:(ev.r.room||"")+(ev.hosp?.date?"  ·  out "+ev.hosp.date:""), domId:"hosp-"+ev.key }))} />
         <button onClick={() => {
           const out = [["Resident", "Room", "Payer", "Sent date", "Day", "Time", "Shift", "Sent by", "Reason", "Bedhold", "Status", "Return date"]];
-          events.forEach((r) => out.push([r.name, r.room, r.payer || "", r.hosp.date || "", bbDayOfWeek(r.hosp.date), r.hosp.time || "", bbShift(r.hosp.time), r.hosp.sentBy || "", r.hosp.reason || "", r.hosp.bedhold === "Y" ? "Yes" : "No", r.status === "Hospitalization" ? "At hospital" : r.status, r.hosp.returned || ""]));
+          events.forEach((e) => {
+            const outcome = e.current ? "At hospital" : e.hosp?.returned ? "Returned" : e.r?.status === "Deceased" ? "Deceased" : e.r?.status === "Discharged" ? "Discharged" : "Returned";
+            out.push([e.r?.name || "", e.r?.room || "", e.r?.payer || "", e.hosp.date || "", bbDayOfWeek(e.hosp.date), e.hosp.time || "", bbShift(e.hosp.time), e.hosp.sentBy || "", e.hosp.reason || "", e.hosp.bedhold === "Y" ? "Yes" : "No", outcome, e.hosp.returned || ""]);
+          });
           downloadCSV(`Hospitalizations_${facility.name.replace(/\s+/g, "_")}_${todayISO()}.csv`, out);
         }} className="text-sm rounded-md px-3 py-1.5" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Export (CSV)</button>
         <div className="inline-flex gap-1 p-1 rounded-xl" style={{ background: BRAND.lineSoft }}>
@@ -2603,7 +2608,7 @@ function RehospModule({ facility, isAdmin }) {
         events.forEach((r) => { if (byShift[shiftOf(r)] != null) byShift[shiftOf(r)]++; });
         const stays = returned.map((r) => diffDays(r.hosp.date, r.hosp.returned)).filter((d) => d != null && d >= 0);
         const avgStay = stays.length ? (stays.reduce((a, b) => a + b, 0) / stays.length).toFixed(1) : null;
-        const deaths = events.filter((r) => r.status === "Deceased").length;
+        const deaths = events.filter((e) => !e.current && !e.hosp?.returned && e.r?.status === "Deceased").length;
         const rate = events.length ? Math.round((returned.length / events.length) * 100) : 0;
         return (
           <div className="rounded-xl px-4 py-3 mb-5" role="button" title="Show graphs" onClick={() => setPatternsBig(true)}
