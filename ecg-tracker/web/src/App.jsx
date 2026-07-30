@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, Component } from "react";
 import * as Sentry from "@sentry/react";
+import ExcelJS from "exceljs";
 
 // --- Error monitoring (Sentry). Only turns on if a DSN is configured in the host (Vercel env). ---
 const SENTRY_DSN = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_SENTRY_DSN) || "";
@@ -1106,10 +1107,45 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
 
   // Move a resident's details into an empty destination bed, and clear the bed they left.
 
-  const exportBoard = () => {
+  
+  const [sendingDone, setSendingDone] = useState(false);
+  const sendCensusDone = async () => {
+    if (sendingDone) return;
+    setSendingDone(true);
+    try {
+      const iso = todayISO();
+      const wb = await buildBedboardWorkbook(facility, iso, res, counts);
+      const buf = await wb.xlsx.writeBuffer();
+      let bin = ""; const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      const xlsxBase64 = btoa(bin);
+      const admitsToday = res.filter(r => r.admit === iso).length;
+      const leftToday = bedboardStore.getLeft(facility).filter(p => p.leftLogged === iso).length;
+      const out = await api("/api/census-done", "POST", {
+        facilityId: fac.id, facilityName: facility, dateISO: iso,
+        summary: { occ: counts.occ, avail: counts.avail, hosp: counts.hosp, bh: counts.bh, admits: admitsToday, left: leftToday },
+        xlsxBase64,
+      });
+      toast(`Update email sent to ${out.sent} recipient${out.sent===1?"":"s"}.`);
+    } catch (e) { toast(e.message || "The email could not be sent."); }
+    setSendingDone(false);
+  };
+const exportBoard = async () => {
     const iso = viewing ? viewDate : todayISO();
     const rows = displayRes;
     if (!rows || !rows.length) { toast(`No census data to export for ${iso}.`); return; }
+    try {
+      const wb = await buildBedboardWorkbook(facility, iso, rows, counts);
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `Bedboard_${facility.replace(/\s+/g, "_")}_${iso}.xlsx`;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("Bed board exported.");
+    } catch (e) { toast("Export failed: " + e.message); }
+    return;
+    // (previous CSV export kept below, unreachable)
     const out = [["Date","Wing","Room","Name","Payer","M/F","Vent","Status","Admit date"]];
     rows.forEach((r) => out.push([iso, r.wing, r.room, r.name || "", r.payer || "", r.mf || "", r.vent ? "Y" : "", r.status || "", r.admit || ""]));
     downloadCSV(`Census_${facility.replace(/\s+/g, "_")}_${iso}.csv`, out);
@@ -1254,6 +1290,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             {/* Top row — Export / Import, both same color */}
             <div className="flex items-center gap-2 flex-wrap justify-end">
               <button onClick={exportBoard} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Export</button>
+            <button onClick={sendCensusDone} disabled={sendingDone} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: sendingDone ? "#8b93a5" : BRAND.ink }}>{sendingDone ? "Sending…" : "Update done — email"}</button>
               {canImport && (
                 <label className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink, cursor:"pointer" }} title="Replace this board from a CSV file (admin only)">
                   Import
@@ -1735,6 +1772,141 @@ function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCa
   );
 }
 
+
+
+// Build the Daily Bed Board as a styled Excel workbook (visual only — plain values, no formulas),
+// mirroring the original facility bedboard layout: title, count tiles, wings side by side.
+async function buildBedboardWorkbook(facilityName, iso, rows, counts) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Bed Board", { views: [{ showGridLines: false }] });
+  const TINT = { Available:"FFFFFFFF", Active:"FFFFFFFF", Admitting:"FFEAF2FB", "Room Move":"FFF3EEE4", "COVID+":"FFFDECEB", Iso:"FFFDECEB", Hospitalization:"FFFDF4DD", Discharged:"FFEEF0F3", Deceased:"FFEEF0F3", Blocked:"FFF1F1F1" };
+  const INK = "FF1C2B4A", SOFT = "FF6B7280", LINE = "FFD9DCE3";
+  const thin = { style:"thin", color:{ argb: LINE } };
+  const border = { top:thin, bottom:thin, left:thin, right:thin };
+
+  // Wings side by side, two per band, 6 columns each + a gap column.
+  const wings = {};
+  rows.forEach(r => { (wings[r.wing] = wings[r.wing] || []).push(r); });
+  const wingNames = Object.keys(wings);
+  const COLS = ["Room","Name","Status","M/F","Vent","Payer"];
+  const widths = [9, 24, 15, 5, 5, 8];
+  for (let b = 0; b < Math.ceil(wingNames.length/2); b++) {
+    widths.forEach((w,i) => { ws.getColumn(b===0 ? i+1 : 0 || i+1).width = w; });
+  }
+  // set widths for two blocks + gap (cols 1-6, 7 gap, 8-13)
+  [ ...widths, 2, ...widths ].forEach((w, i) => { ws.getColumn(i+1).width = w; });
+
+  // Title
+  ws.mergeCells(1,1,1,13);
+  const t = ws.getCell(1,1); t.value = "DAILY BED BOARD";
+  t.font = { name:"Georgia", size:18, bold:true, color:{ argb: INK } };
+  t.alignment = { horizontal:"center" };
+  ws.mergeCells(2,1,2,13);
+  const sub = ws.getCell(2,1); sub.value = `${facilityName}  ·  ${iso}`;
+  sub.font = { name:"Arial", size:11, color:{ argb: SOFT } };
+  sub.alignment = { horizontal:"center" };
+
+  // Count tiles
+  const tiles = [["TOTAL BEDS",counts.total],["OCCUPIED",counts.occ],["AVAILABLE",counts.avail],["OCCUPANCY",`${counts.occPct}%`],["IN HOSPITAL",counts.hosp],["BEDHOLD",counts.bh],["VENT",counts.vent]];
+  tiles.forEach(([label,val], i) => {
+    const c = 1 + i*2;
+    if (c+1 > 13) return;
+    ws.mergeCells(4,c,4,c+1);
+    const lc = ws.getCell(4,c); lc.value = label; lc.font = { name:"Arial", size:8, bold:true, color:{ argb: SOFT } }; lc.alignment = { horizontal:"center" };
+    ws.mergeCells(5,c,5,c+1);
+    const vc = ws.getCell(5,c); vc.value = val; vc.font = { name:"Georgia", size:14, bold:true, color:{ argb: INK } }; vc.alignment = { horizontal:"center" };
+  });
+
+  // Wing blocks
+  const startCol = (side) => side === 0 ? 1 : 8;
+  let bandRow = 7;
+  for (let i = 0; i < wingNames.length; i += 2) {
+    let bandBottom = bandRow;
+    for (let side = 0; side < 2; side++) {
+      const wing = wingNames[i+side];
+      if (!wing) continue;
+      const list = wings[wing];
+      const c0 = startCol(side);
+      const beds = list.filter(r => !r._left || r._bedFree).length;
+      const occ = list.filter(r => !r._left && (IN_FACILITY.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold==="Y"))).length;
+      ws.mergeCells(bandRow, c0, bandRow, c0+5);
+      const h = ws.getCell(bandRow, c0);
+      h.value = `${wing}  (${beds} beds · ${occ} occupied)`;
+      h.font = { name:"Georgia", size:12, bold:true, color:{ argb: INK } };
+      h.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFF6F1E7" } };
+      COLS.forEach((cn, ci) => {
+        const cell = ws.getCell(bandRow+1, c0+ci);
+        cell.value = cn; cell.font = { name:"Arial", size:9, bold:true, color:{ argb: SOFT } };
+        cell.border = border;
+      });
+      list.forEach((r, ri) => {
+        const rr = bandRow + 2 + ri;
+        const isLeft = !!r._left;
+        const vals = [r.room||"", (r.name||"") + (isLeft ? `  · left ${r.leftDate||""}` : ""), r.status||"", r.mf||"", r.vent?"Y":"", r.payer||""];
+        vals.forEach((v, ci) => {
+          const cell = ws.getCell(rr, c0+ci);
+          cell.value = v;
+          cell.font = { name:"Arial", size:10, color:{ argb: isLeft ? SOFT : INK }, italic: isLeft };
+          cell.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: TINT[r.status] || "FFFFFFFF" } };
+          cell.border = border;
+        });
+      });
+      bandBottom = Math.max(bandBottom, bandRow + 1 + list.length);
+    }
+    bandRow = bandBottom + 2;
+  }
+  return wb;
+}
+
+
+// Admin: per-facility recipient list for the census "update done" email.
+function RecipientsManager({ facilities, onClose }){
+  const [facId, setFacId] = useState(facilities[0]?.id || "");
+  const [emails, setEmails] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const load = async (id) => { setErr(""); try { const r = await api(`/api/census-recipients/${id}`); setEmails(r.emails || []); } catch (e) { setErr(e.message); } };
+  useEffect(() => { if (facId) load(facId); }, [facId]);
+  const save = async (list) => {
+    setBusy(true); setErr("");
+    try { const r = await api(`/api/census-recipients/${facId}`, "PUT", { emails: list }); setEmails(r.emails || list); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const add = () => {
+    const e = draft.trim().toLowerCase();
+    if (!/.+@.+\..+/.test(e)) { setErr("That doesn't look like an email address."); return; }
+    if (emails.includes(e)) { setDraft(""); return; }
+    setDraft(""); save([...emails, e]);
+  };
+  return (
+    <Modal title="Census update emails" onClose={onClose}>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:10 }}>
+        When someone presses "Update done — email" on a facility's census, these people get the email (with the bed board attached).
+      </div>
+      <L label="Facility"><select value={facId} onChange={e=>setFacId(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>
+        {facilities.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+      </select></L>
+      <div style={{ height:10 }} />
+      <div className="flex gap-2">
+        <input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="name@eminentcaregroup.com"
+          className="flex-1 rounded-md px-3 py-2 text-sm" style={{ border:`1px solid ${BRAND.line}` }} />
+        <button onClick={add} disabled={busy} className="text-sm rounded-md px-3 py-2 text-white" style={{ background:BRAND.ink }}>Add</button>
+      </div>
+      {err && <div style={{ fontSize:12, color:"#a33", marginTop:8 }}>{err}</div>}
+      <div style={{ marginTop:12 }}>
+        {emails.length === 0 ? <div style={{ fontSize:12, color:BRAND.inkSoft }}>No recipients yet for this facility.</div>
+          : emails.map(e => (
+            <div key={e} className="flex items-center justify-between" style={{ padding:"6px 2px", borderTop:`1px solid ${BRAND.lineSoft}`, fontSize:13 }}>
+              <span>{e}</span>
+              <button onClick={()=>save(emails.filter(x=>x!==e))} disabled={busy} style={{ color:BRAND.inkSoft, background:"none", border:"none", cursor:"pointer", fontSize:12 }}>remove</button>
+            </div>
+          ))}
+      </div>
+    </Modal>
+  );
+}
 
 // Search-and-jump: type to see matches under the bar; click one to scroll to its row (gold flash).
 function SearchJump({ items, placeholder }){
@@ -3264,6 +3436,9 @@ function Shell({ auth, onLogout }) {
               <button onClick={() => setAdminPane("users")} title="Logins" className="p-2 rounded-lg" style={{ border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.8)" }}><Users size={15} /></button>
             )}
             {isAdmin && (
+              <button onClick={() => setAdminPane("recipients")} title="Census update emails" className="p-2 rounded-lg" style={{ border: "1px solid rgba(255,255,255,0.2)", color: "#fff" }}><CheckCircle2 size={16} /></button>
+            )}
+            {isAdmin && (
               <button onClick={() => setAdminPane("audit")} title="Activity log" className="p-2 rounded-lg" style={{ border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.55)" }}><History size={15} /></button>
             )}
             <button onClick={onLogout} className="text-xs rounded-lg px-3 py-2" style={{ border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.8)" }}>Sign out</button>
@@ -3281,6 +3456,7 @@ function Shell({ auth, onLogout }) {
 
       {adminPane === "users" && <UserManager facilities={FACILITIES} meId={auth.user.id} onClose={() => setAdminPane(null)} />}
       {adminPane === "audit" && <AuditLog onClose={() => setAdminPane(null)} />}
+      {adminPane === "recipients" && <RecipientsManager facilities={FACILITIES} onClose={() => setAdminPane(null)} />}
 
       {newVersion && (
         <div className="text-center text-sm px-4 py-2" style={{ background: BRAND.ink, color: "#fff" }}>
