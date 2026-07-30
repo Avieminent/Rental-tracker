@@ -1016,23 +1016,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   // When viewing a past date: use that day's snapshot, or if none was saved that day
   // (nobody changed the board), carry forward the most recent snapshot on/before it —
   // because the board looked the same as the last day it was saved.
-  const snapForDate = (fac, iso) => {
-    const hist = bedboardStore.history[fac] || {};
-    // When carrying an older snapshot forward to a quiet day, remove anyone who LEFT
-    // in between — otherwise a discharged resident would still show on days after they left.
-    const scrubCarried = (rows, asOf) => {
-      const gone = bedboardStore.getLeft(fac).filter(p => p.leftDate > asOf && p.leftDate <= iso);
-      if (!gone.length) return rows;
-      return rows.map(r => {
-        const hit = gone.find(p => (r.residentId && r.residentId === p.id) || (!r.residentId && r.name && r.name === p.name));
-        return hit ? { id: r.id, wing: r.wing, room: r.room, residentId: null, name:"", status:"Available", mf:"", vent:false, payer:"", hosp:{}, disc:{}, death:{} } : r;
-      });
-    };
-    if (hist[iso]) return { rows: hist[iso], actual: true, asOf: iso };
-    const priorDays = Object.keys(hist).filter(d => d < iso).sort();
-    const last = priorDays[priorDays.length - 1];
-    return last ? { rows: scrubCarried(hist[last], last), actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
-  };
+  const snapForDate = bbSnapForDate;
   const _snap = viewing ? snapForDate(facility, viewDate) : { rows: res, actual: true, asOf: viewDate };
   // Overlay: residents who LEFT (discharged/deceased/hosp-gone) show on the census for their event day.
   // If their old bed is empty that day they appear in it; if it was refilled, they show as an extra row.
@@ -1986,6 +1970,42 @@ function RecipientsManager({ facilities, onClose }){
     </Modal>
   );
 }
+
+
+// ---- Shared census-history helpers (used by the census page and PPD budgets) ----
+const bbSnapForDate = (fac, iso) => {
+  const hist = bedboardStore.history[fac] || {};
+  const scrubCarried = (rows, asOf) => {
+    const gone = bedboardStore.getLeft(fac).filter(p => p.leftDate > asOf && p.leftDate <= iso);
+    if (!gone.length) return rows;
+    return rows.map(r => {
+      const hit = gone.find(p => (r.residentId && r.residentId === p.id) || (!r.residentId && r.name && r.name === p.name));
+      return hit ? { id: r.id, wing: r.wing, room: r.room, residentId: null, name:"", status:"Available", mf:"", vent:false, payer:"" } : r;
+    });
+  };
+  if (hist[iso]) return { rows: hist[iso], actual: true, asOf: iso };
+  const priorDays = Object.keys(hist).filter(d => d < iso).sort();
+  const last = priorDays[priorDays.length - 1];
+  return last ? { rows: scrubCarried(hist[last], last), actual: false, asOf: last } : { rows: [], actual: true, asOf: iso };
+};
+// Patient days for a month: actual daily occupied counts from the recorded census; days after
+// today are projected at today's census. Occupied = in the building, or at hospital WITH bedhold.
+const bbPatientDays = (facName, month) => {
+  const today = todayISO();
+  const [yy, mm] = month.split("-").map(Number);
+  const nDays = new Date(yy, mm, 0).getDate();
+  const occOf = (rows) => (rows || []).filter(r => r && !r._left && r.name && holdsBed(r)).length;
+  const liveOcc = occOf(bedboardStore.get(facName) || []);
+  let actual = 0, actualDays = 0, projectedDays = 0;
+  for (let d = 1; d <= nDays; d++) {
+    const iso = `${month}-${String(d).padStart(2, "0")}`;
+    if (iso > today) { projectedDays++; continue; }
+    if (iso === today) { actual += liveOcc; actualDays++; continue; }
+    actual += occOf(bbSnapForDate(facName, iso).rows);
+    actualDays++;
+  }
+  return { total: actual + projectedDays * liveOcc, actualDays, projectedDays, liveOcc };
+};
 
 // Search-and-jump: type to see matches under the bar; click one to scroll to its row (gold flash).
 function SearchJump({ items, placeholder }){
@@ -3266,26 +3286,28 @@ function DeptBudgetModule({ facility, data, update, role }) {
   const expenses = rows.filter((x) => x.type === "expense");
   const [month, setMonth] = useState(todayISO().slice(0, 7));
   const [detailDept, setDetailDept] = useState(null);
-  const amounts = budgetAmountsFor(rows, month);
+  const rates = (budgetsDoc && budgetsDoc.ppd) || {};
+  const pd = useMemo(() => bbPatientDays(facility.name, month), [facility.id, month, rows.length, data]);
+  const budgetOf = (dd) => Math.round((num(rates[dd]) || 0) * pd.total * 100) / 100;
   const [addingExp, setAddingExp] = useState(false);
   const [editingExp, setEditingExp] = useState(null);
   const [editingBudgets, setEditingBudgets] = useState(false);
 
   const monthExp = expenses.filter((x) => (x.date || "").startsWith(month));
   const spentBy = (dep) => monthExp.filter((x) => x.dept === dep).reduce((s, x) => s + (num(x.amount) || 0), 0);
-  const depts = BUDGET_DEPTS.filter((d) => (num(amounts[d]) || 0) > 0 || spentBy(d) > 0);
-  const totBudget = depts.reduce((s, d) => s + (num(amounts[d]) || 0), 0);
+  const depts = BUDGET_DEPTS.filter((d) => (num(rates[d]) || 0) > 0 || spentBy(d) > 0);
+  const totBudget = depts.reduce((s, d) => s + budgetOf(d), 0);
   const totSpent = monthExp.reduce((s, x) => s + (num(x.amount) || 0), 0);
-  const overCount = depts.filter((d) => (num(amounts[d]) || 0) > 0 && spentBy(d) > num(amounts[d])).length;
+  const overCount = depts.filter((d) => budgetOf(d) > 0 && spentBy(d) > budgetOf(d)).length;
 
-  const saveBudgets = async (next, forMonth) => {
+  const saveRates = async (next) => {
     try {
       if (budgetsDoc) {
-        const doc = { ...budgetsDoc, byMonth: { ...(budgetsDoc.byMonth || {}), [forMonth]: next } };
+        const doc = { ...budgetsDoc, ppd: next };
         await updateRecord(doc.id, stripId(doc));
         update((d) => { const a = d.budget[facility.id]; const i = a.findIndex((x) => x.id === doc.id); if (i >= 0) a[i] = doc; });
       } else {
-        const docData = { type: "budgets", byMonth: { [forMonth]: next } };
+        const docData = { type: "budgets", ppd: next };
         const id = await createRecord("budget", "budgets", facility.id, docData);
         update((d) => { (d.budget ||= {}); (d.budget[facility.id] ||= []).push({ ...docData, id }); });
       }
@@ -3311,14 +3333,15 @@ function DeptBudgetModule({ facility, data, update, role }) {
   };
 
   const exportHistory = () => {
-    const out = [["Department budgets — " + facility.name, "", "", "", "", ""], ["Month", month, "", "", "", ""], ["", "", "", "", "", ""],
-      ["Department", "Monthly budget ($)", "Spent this month ($)", "Remaining ($)", "Status", ""]];
+    const out = [["Department budgets — " + facility.name, "", "", "", "", ""], ["Month", month, "", "", "", ""],
+      ["Patient days", pd.total, pd.projectedDays ? `${pd.actualDays} actual + ${pd.projectedDays} projected at today's census (${pd.liveOcc})` : "actual", "", "", ""], ["", "", "", "", "", ""],
+      ["Department", "Rate ($/patient day)", "Monthly budget ($)", "Spent this month ($)", "Remaining ($)", "Status"]];
     BUDGET_DEPTS.forEach((d) => {
-      const b = num(amounts[d]) || 0, sp = spentBy(d);
+      const b = budgetOf(d), sp = spentBy(d);
       if (!b && !sp) return;
-      out.push([d, b, sp, b - sp, sp > b && b > 0 ? "OVER" : "Under", ""]);
+      out.push([d, num(rates[d]) || 0, b, sp, b - sp, sp > b && b > 0 ? "OVER" : "Under"]);
     });
-    out.push(["Total", totBudget, totSpent, totBudget - totSpent, "", ""]);
+    out.push(["Total", "", totBudget, totSpent, totBudget - totSpent, ""]);
     out.push(["", "", "", "", "", ""], ["Spending history (all time)", "", "", "", "", ""],
       ["Date", "Department", "Purpose", "Vendor", "Bought by", "Amount ($)"]);
     [...expenses].sort((a, b) => (a.dept || "").localeCompare(b.dept || "") || (a.date || "").localeCompare(b.date || ""))
@@ -3332,26 +3355,27 @@ function DeptBudgetModule({ facility, data, update, role }) {
         <SearchJump placeholder="Search purpose, dept, vendor" items={monthExp.map(x=>({ label:x.purpose||x.department||"(expense)", sub:[x.department,x.vendor,x.date].filter(Boolean).join("  ·  "), domId:"bud-"+x.id }))} />
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="text-sm rounded-md px-2 py-1.5" style={{ border: `1px solid ${BRAND.line}` }} />
         <button onClick={exportHistory} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Download history (CSV)</button>
-        {canEditBudgets && <button onClick={() => setEditingBudgets(true)} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Edit budgets</button>}
+        {canEditBudgets && <button onClick={() => setEditingBudgets(true)} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Set PPD rates</button>}
         <AddBtn onClick={() => setAddingExp(true)}>Add expense</AddBtn>
       </div>} />
-      <div style={{ color: BRAND.inkSoft, fontSize: 13, marginTop: -8, marginBottom: 14 }}>Monthly budget per department, with live spending against it. Budgets are set by authorized users; anyone with access can log expenses.</div>
+      <div style={{ color: BRAND.inkSoft, fontSize: 13, marginTop: -8, marginBottom: 14 }}>Budgets are per patient day (PPD): an administrator sets each department's rate, and the month's budget = rate × that month's patient days from the real census. Anyone with access can log expenses.</div>
 
       <div className="grid gap-3 mb-5" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))" }}>
-        {[["Total budget", money(totBudget)], ["Spent this month", money(totSpent), totSpent > totBudget && totBudget ? "bad" : null], ["Remaining", money(totBudget - totSpent), totBudget - totSpent < 0 ? "bad" : null], ["Departments over", overCount, overCount ? "bad" : null]].map(([l, v, tone]) => (
+        {[["Patient days", pd.total.toLocaleString() + (pd.projectedDays ? " ·" : ""), null, pd.projectedDays ? `${pd.actualDays} actual + ${pd.projectedDays} projected` : null], ["Total budget", money(totBudget)], ["Spent this month", money(totSpent), totSpent > totBudget && totBudget ? "bad" : null], ["Remaining", money(totBudget - totSpent), totBudget - totSpent < 0 ? "bad" : null], ["Departments over", overCount, overCount ? "bad" : null]].map(([l, v, tone, sub]) => (
           <div key={l} className="rounded-xl px-3 py-2" style={{ background: BRAND.card, border: `1px solid ${tone === "bad" ? "#eec4c0" : BRAND.line}` }}>
             <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: BRAND.inkSoft }}>{l}</div>
             <div style={{ fontSize: 22, fontFamily: SERIF, color: tone === "bad" ? "#c0392b" : BRAND.ink }}>{v}</div>
+            {sub && <div style={{ fontSize: 10, color: BRAND.inkSoft }}>{sub}</div>}
           </div>
         ))}
       </div>
 
       {depts.length === 0 ? (
-        <Empty text={canEditBudgets ? "No budgets set yet — click 'Edit budgets' to set each department's monthly amount." : "No budgets set yet. An administrator sets each department's monthly amount."} />
+        <Empty text={canEditBudgets ? "No PPD rates set yet — click 'Set PPD rates' to enter each department's rate per patient day." : "No PPD rates set yet. An administrator sets each department's rate per patient day."} />
       ) : (
         <div className="grid gap-3 mb-6" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))" }}>
           {depts.map((d) => {
-            const b = num(amounts[d]) || 0, sp = spentBy(d), rem = b - sp;
+            const b = budgetOf(d), sp = spentBy(d), rem = b - sp;
             const pct = b > 0 ? Math.min(100, Math.round((sp / b) * 100)) : 100;
             const over = b > 0 && sp > b;
             return (
@@ -3360,7 +3384,7 @@ function DeptBudgetModule({ facility, data, update, role }) {
                   <div style={{ fontFamily: SERIF, fontSize: 16 }}>{d}</div>
                   {over ? <Pill tone={TONE.bad}>Over by {money(sp - b)}</Pill> : b > 0 && pct >= 85 ? <Pill tone={TONE.warn}>{pct}% used</Pill> : null}
                 </div>
-                <div style={{ fontSize: 12, color: BRAND.inkSoft, marginTop: 2 }}>{money(sp)} of {b ? money(b) : "no budget"} spent</div>
+                <div style={{ fontSize: 12, color: BRAND.inkSoft, marginTop: 2 }}>{money(sp)} of {b ? money(b) : "no rate set"} spent{num(rates[d]) ? ` · ${money(num(rates[d]))}/pd` : ""}</div>
                 <div style={{ background: BRAND.lineSoft, borderRadius: 4, height: 8, marginTop: 8 }}>
                   <div style={{ width: `${b ? pct : 100}%`, background: over ? "#c0392b" : pct >= 85 ? "#c8a24a" : BRAND.tan, height: 8, borderRadius: 4 }} />
                 </div>
@@ -3387,8 +3411,8 @@ function DeptBudgetModule({ facility, data, update, role }) {
       )}
 
       {(addingExp || editingExp) && <ExpenseModal row={editingExp || {}} onClose={() => { setAddingExp(false); setEditingExp(null); }} onSave={saveExpense} />}
-      {editingBudgets && <BudgetEditModal initialMonth={month} getFor={(mm) => budgetAmountsFor(rows, mm)} onClose={() => setEditingBudgets(false)} onSave={saveBudgets} />}
-      {detailDept && <DeptDetailModal dept={detailDept} month={month} budget={num(amounts[detailDept]) || 0} expenses={monthExp.filter((x) => x.dept === detailDept)} onClose={() => setDetailDept(null)} />}
+      {editingBudgets && <BudgetEditModal rates={rates} onClose={() => setEditingBudgets(false)} onSave={saveRates} />}
+      {detailDept && <DeptDetailModal dept={detailDept} month={month} budget={budgetOf(detailDept)} expenses={monthExp.filter((x) => x.dept === detailDept)} onClose={() => setDetailDept(null)} />}
     </div>
   );
 }
@@ -3462,32 +3486,29 @@ function ExpenseModal({ row, onClose, onSave }) {
   );
 }
 
-function BudgetEditModal({ initialMonth, getFor, onClose, onSave }) {
-  const [bMonth, setBMonth] = useState(initialMonth);
-  const fromAmounts = (mm) => { const a = getFor(mm); const o = {}; BUDGET_DEPTS.forEach((d) => { o[d] = a[d] ?? ""; }); return o; };
-  const [f, setF] = useState(() => fromAmounts(initialMonth));
+function BudgetEditModal({ rates, onClose, onSave }) {
+  const [f, setF] = useState(() => { const o = {}; BUDGET_DEPTS.forEach((d) => { o[d] = rates[d] ?? ""; }); return o; });
   return (
-    <Modal title="Edit monthly budgets" onClose={onClose}>
-      <div style={{ fontSize: 13, color: BRAND.inkSoft, marginBottom: 8 }}>Set each department's budget for a month — past, current, or future. The amounts carry forward to later months until you change them again.</div>
-      <div className="flex items-center gap-2 mb-3">
-        <span style={{ fontSize: 12, color: BRAND.inkSoft }}>Budgets for</span>
-        <input type="month" value={bMonth} onChange={(e) => { setBMonth(e.target.value); setF(fromAmounts(e.target.value)); }} className="text-sm rounded-md px-2 py-1" style={{ border: `1px solid ${BRAND.line}` }} />
+    <Modal title="Set PPD rates" onClose={onClose}>
+      <div style={{ fontSize: 13, color: BRAND.inkSoft, marginBottom: 8 }}>
+        Dollars per patient day, per department. Each month's budget = rate × that month's patient days, computed from the real census (bedhold days count; remaining days project at today's census).
       </div>
       {BUDGET_DEPTS.map((d) => (
         <div key={d} className="flex items-center justify-between gap-3 py-1.5" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
           <span style={{ fontSize: 14 }}>{d}</span>
           <div className="flex items-center gap-1">
             <span style={{ color: BRAND.inkSoft }}>$</span>
-            <input type="number" value={f[d]} placeholder="—" onChange={(e) => setF((s) => ({ ...s, [d]: e.target.value }))}
-              className="rounded-md px-2 py-1" style={{ border: `1px solid ${BRAND.line}`, width: 110 }} />
+            <input type="number" step="0.01" value={f[d]} placeholder="—" onChange={(e) => setF((s) => ({ ...s, [d]: e.target.value }))}
+              className="rounded-md px-2 py-1" style={{ border: `1px solid ${BRAND.line}`, width: 90 }} />
+            <span style={{ color: BRAND.inkSoft, fontSize: 12, whiteSpace: "nowrap" }}>/ patient day</span>
           </div>
         </div>
       ))}
       <div style={{ height: 12 }} />
       <div className="flex justify-end gap-2">
         <button onClick={onClose} className="text-sm rounded-md px-3 py-1.5" style={{ border: `1px solid ${BRAND.line}` }}>Cancel</button>
-        <button onClick={() => { const o = {}; BUDGET_DEPTS.forEach((d) => { const v = num(f[d]); if (v != null && v > 0) o[d] = v; }); onSave(o, bMonth); }}
-          className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: BRAND.ink }}>Save budgets</button>
+        <button onClick={() => { const o = {}; BUDGET_DEPTS.forEach((d) => { const v = num(f[d]); if (v != null && v > 0) o[d] = v; }); onSave(o); }}
+          className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: BRAND.ink }}>Save rates</button>
       </div>
     </Modal>
   );
@@ -3759,13 +3780,14 @@ function Dashboard({ data, onOpen }) {
   const bMonth = todayISO().slice(0, 7);
   FACILITIES.forEach((f) => {
     const brs = (data.budget && data.budget[f.id]) || [];
-    const amounts = budgetAmountsFor(brs, bMonth);
+    const rates = ((brs.find((x) => x.type === "budgets") || {}).ppd) || {};
+    const fpd = bbPatientDays(f.name, bMonth).total;
     const exp = brs.filter((x) => x.type === "expense" && (x.date || "").startsWith(bMonth));
     const spent = exp.reduce((s, x) => s + (num(x.amount) || 0), 0);
-    const budget = Object.values(amounts).reduce((s, v) => s + (num(v) || 0), 0);
+    const budget = Object.values(rates).reduce((s, v) => s + (num(v) || 0) * fpd, 0);
     if (budget || spent) bReporting++;
     bBudget += budget; bSpent += spent;
-    Object.keys(amounts).forEach((dep) => { const b = num(amounts[dep]) || 0; if (!b) return; const ds = exp.filter((x) => x.dept === dep).reduce((s, x) => s + (num(x.amount) || 0), 0); if (ds > b) bOver++; });
+    Object.keys(rates).forEach((dep) => { const b = (num(rates[dep]) || 0) * fpd; if (!b) return; const ds = exp.filter((x) => x.dept === dep).reduce((s, x) => s + (num(x.amount) || 0), 0); if (ds > b) bOver++; });
   });
   const budgetStats = [["Spent / budget", `${money(bSpent)} / ${money(bBudget)}`, bSpent > bBudget ? "bad" : "ok"], ["Departments over", bOver, bOver ? "bad" : "ok"], ["Reporting", bReporting]];
   // new config-driven modules
