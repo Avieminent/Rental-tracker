@@ -431,7 +431,7 @@ function RosterModule({ facility, data, update }) {
 
   return (
     <div>
-      <SectionHead title="Roster" right={<AddBtn onClick={() => setModal({})}>Add role</AddBtn>}
+      <SectionHead title="Roster" right={<div className="flex items-center gap-2 flex-wrap"><SearchJump placeholder="Search name or role" items={staff.map(st=>({ label:(st.name||"").trim()||st.role||"", sub:st.role||"", domId:"ros-"+st.id }))} /><AddBtn onClick={() => setModal({})}>Add role</AddBtn></div>}
         stats={[["Roles listed", staff.length], ["Counted staff", headcount], ["Vacancies", vacancies, vacancies ? "warn" : "ok"]]} />
 
       <div className="rounded-xl p-5 mb-4" style={{ background: BRAND.card, border: `1px solid ${BRAND.line}` }}>
@@ -471,7 +471,7 @@ function RosterModule({ facility, data, update }) {
       {staff.length === 0 ? <Empty text="No roster rows yet — add the first role." /> : (
         <Table head={["Department / Role", "Name", "Email", "Phone", "# Staff", "Notes", ""]}>
           {staff.map((s) => (
-            <tr key={s.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
+            <tr key={s.id} id={"ros-"+s.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
               <Td><span className="font-medium">{s.role}</span></Td>
               <Td>{isVacant(s.name) ? <Pill tone={TONE.warn}>{(s.name || "").trim() || "Open"}</Pill> : s.name}</Td>
               <Td soft>{s.email || "—"}</Td><Td soft>{s.phone || "—"}</Td>
@@ -1264,6 +1264,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             </div>
             {/* Bottom row — Date then Add resident, pushed to the right */}
             <div className="flex items-center gap-2 flex-wrap justify-end">
+              <SearchJump placeholder="Search name or room" items={displayRes.filter(r=>r.name).map(r=>({ label:r.name, sub:(r.room||"")+"  ·  "+(r.wing||""), domId:"bed-"+r.id }))} />
               {viewing && <button onClick={()=>setViewDate(null)} className="text-xs rounded-md px-2 py-1" style={{ border:`1px solid ${BRAND.line}`, background:"#fff", color:BRAND.ink }}>Back to today</button>}
               <span style={{ fontSize:12, color:BRAND.inkSoft }}>Date</span>
               <input type="date" value={viewDate || todayISO()} max={todayISO()} onChange={(e)=>setViewDate(e.target.value===todayISO()?null:e.target.value)} className="text-sm rounded-md px-2 py-1.5" style={{ background:BRAND.tan, color:"#fff", border:"none", colorScheme:"dark" }} />
@@ -1340,7 +1341,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                     {list.map(r => {
                       const { st, shown } = wingRow(r);
                       return (
-                        <tr key={r.id} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background:st.tint }}>
+                        <tr key={r.id} id={"bed-"+r.id} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background:st.tint }}>
                           <td className="px-2 py-1.5" style={{ borderLeft:`3px solid ${st.bar}` }}>{r.room}</td>
                           <td className="px-2 py-1.5" style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                             {blocksBed(r)
@@ -1734,6 +1735,47 @@ function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCa
   );
 }
 
+
+// Search-and-jump: type to see matches under the bar; click one to scroll to its row (gold flash).
+function SearchJump({ items, placeholder }){
+  const [q, setQ] = useState("");
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = words.length ? items.filter(it => {
+    const hay = ((it.label||"") + " " + (it.sub||"")).toLowerCase();
+    return words.every(w => hay.includes(w));
+  }).slice(0, 8) : [];
+  const jump = (it) => {
+    const el = document.getElementById(it.domId);
+    setQ("");
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    const orig = el.style.backgroundColor;
+    el.style.transition = ""; el.style.backgroundColor = "#fac775";
+    setTimeout(() => { el.style.transition = "background-color 1.2s"; el.style.backgroundColor = orig || ""; }, 800);
+    setTimeout(() => { el.style.transition = ""; }, 2300);
+  };
+  return (
+    <div style={{ position:"relative", minWidth:190 }}>
+      <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{ if (e.key==="Escape") setQ(""); }}
+        placeholder={placeholder || "Search"} className="text-sm rounded-md px-3 py-1.5 w-full"
+        style={{ border:`1px solid ${BRAND.line}`, background:"#fff" }} />
+      {q && <button onClick={()=>setQ("")} style={{ position:"absolute", right:8, top:"50%", transform:"translateY(-50%)", color:BRAND.inkSoft, fontSize:13, background:"none", border:"none", cursor:"pointer" }}>✕</button>}
+      {q && (
+        <div style={{ position:"absolute", top:"110%", left:0, right:0, zIndex:60, background:"#fff", border:`1px solid ${BRAND.line}`, borderRadius:8, boxShadow:"0 8px 24px rgba(0,0,0,0.14)", overflow:"hidden" }}>
+          {hits.length === 0 ? <div style={{ padding:"8px 12px", fontSize:12, color:BRAND.inkSoft }}>No matches</div>
+            : hits.map((it, i) => (
+              <button key={i} onClick={()=>jump(it)} className="w-full text-left"
+                style={{ display:"flex", justifyContent:"space-between", gap:12, padding:"8px 12px", fontSize:13, borderTop: i?`1px solid ${BRAND.lineSoft}`:"none", background:"#fff", cursor:"pointer" }}>
+                <span style={{ fontWeight:500 }}>{it.label}</span>
+                <span style={{ color:BRAND.inkSoft, whiteSpace:"nowrap" }}>{it.sub}</span>
+              </button>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddModal({ openBeds, backfillDate, genderConflict, onAdd, onCancel }){
   // openBeds: [{ id, wing, room }] — beds with no current resident. Adding fills one of these.
   const [f,setF]=useState({ bedId: openBeds[0]?.id || "", name:"", payer:"", mf:"", vent:false });
@@ -2113,6 +2155,7 @@ function RehospModule({ facility, isAdmin }) {
           <div style={{ color: BRAND.inkSoft, fontSize: 13 }}>Fed automatically from the bedboard — mark a resident "Hospitalization" on the Census tab and they appear here.</div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+        <SearchJump placeholder="Search name, room, reason" items={shown.map(ev=>({ label:ev.r.name, sub:(ev.r.room||"")+(ev.hosp?.date?"  ·  out "+ev.hosp.date:""), domId:"hosp-"+ev.key }))} />
         <button onClick={() => {
           const out = [["Resident", "Room", "Payer", "Sent date", "Day", "Time", "Shift", "Sent by", "Reason", "Bedhold", "Status", "Return date"]];
           events.forEach((r) => out.push([r.name, r.room, r.payer || "", r.hosp.date || "", bbDayOfWeek(r.hosp.date), r.hosp.time || "", bbShift(r.hosp.time), r.hosp.sentBy || "", r.hosp.reason || "", r.hosp.bedhold === "Y" ? "Yes" : "No", r.status === "Hospitalization" ? "At hospital" : r.status, r.hosp.returned || ""]));
@@ -2167,7 +2210,7 @@ function RehospModule({ facility, isAdmin }) {
               </tr></thead>
               <tbody>
                 {shown.map((ev) => (
-                  <tr key={ev.key} style={{ borderTop: `0.5px solid ${BRAND.lineSoft}`, background: ev.current ? "#fdf4dd" : "transparent" }}>
+                  <tr key={ev.key} id={"hosp-"+ev.key} style={{ borderTop: `0.5px solid ${BRAND.lineSoft}`, background: ev.current ? "#fdf4dd" : "transparent" }}>
                     <td className="px-3 py-2.5">
                       <div className="font-medium" style={{ whiteSpace: "nowrap" }}>{ev.r.name}</div>
                       <div style={{ fontSize: 11, color: BRAND.inkSoft, whiteSpace: "nowrap" }}>Room {ev.r.room} · {ev.r.payer || "—"}</div>
@@ -2394,6 +2437,7 @@ function RFMSModule({ facility, canSign }) {
           <div style={{ color: BRAND.inkSoft, fontSize: 13 }}>One trust account per resident, fed from the bedboard. Balances are entered manually (weekly). Deadlines are calculated automatically.</div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+        <SearchJump placeholder="Search name or room" items={shown.map(x=>({ label:x.r.name, sub:(x.r.room||"—"), domId:"rfms-"+x.r.id }))} />
         <button onClick={exportSpendLog} className="text-sm rounded-md px-3 py-1.5" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Export spend log (CSV)</button>
         <div className="inline-flex gap-1 p-1 rounded-xl" style={{ background: BRAND.lineSoft }}>
           {[["open", "Open"], ["all", "All"], ["closed", "Refunds due"]].map(([k, l]) => (
@@ -2435,7 +2479,7 @@ function RFMSModule({ facility, canSign }) {
               </tr></thead>
               <tbody>
                 {shown.map((x) => (
-                  <tr key={x.r.id} style={{ borderTop: `0.5px solid ${BRAND.lineSoft}`, background: x.refund && x.refund.left <= 0 ? "#fdeceb" : x.over ? "#fdeceb" : x.r.status === "Hospitalization" ? "#fdf4dd" : "transparent" }}>
+                  <tr key={x.r.id} id={"rfms-"+x.r.id} style={{ borderTop: `0.5px solid ${BRAND.lineSoft}`, background: x.refund && x.refund.left <= 0 ? "#fdeceb" : x.over ? "#fdeceb" : x.r.status === "Hospitalization" ? "#fdf4dd" : "transparent" }}>
                     <td className="px-3 py-2.5">
                       <div className="font-medium" style={{ whiteSpace: "nowrap" }}>{x.r.name}</div>
                       <div style={{ fontSize: 11, color: BRAND.inkSoft, whiteSpace: "nowrap" }}>Room {x.r.room} · {x.r.payer || "—"}{x.r.admit ? ` · adm ${x.r.admit}` : ""}</div>
@@ -2862,6 +2906,7 @@ function DeptBudgetModule({ facility, data, update, role }) {
   return (
     <div>
       <SectionHead title="Department Budgets" right={<div className="flex items-center gap-2 flex-wrap">
+        <SearchJump placeholder="Search purpose, dept, vendor" items={monthExp.map(x=>({ label:x.purpose||x.department||"(expense)", sub:[x.department,x.vendor,x.date].filter(Boolean).join("  ·  "), domId:"bud-"+x.id }))} />
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="text-sm rounded-md px-2 py-1.5" style={{ border: `1px solid ${BRAND.line}` }} />
         <button onClick={exportHistory} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Download history (CSV)</button>
         {canEditBudgets && <button onClick={() => setEditingBudgets(true)} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Edit budgets</button>}
@@ -2909,7 +2954,7 @@ function DeptBudgetModule({ facility, data, update, role }) {
       {monthExp.length === 0 ? <Empty text="No expenses logged for this month yet." /> : (
         <Table head={["Date", "Department", "Purpose", "Vendor", "Bought by", "Amount", ""]}>
           {[...monthExp].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((x) => (
-            <tr key={x.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
+            <tr key={x.id} id={"bud-"+x.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
               <Td soft>{fmtDate(x.date)}</Td><Td>{x.dept}</Td><Td soft>{x.purpose}</Td><Td>{x.vendor}</Td><Td soft>{x.buyer}</Td>
               <Td right>{money(num(x.amount))}</Td>
               <Td><RowActions onEdit={() => setEditingExp(x)} onDelete={() => delExpense(x.id)} /></Td>
@@ -3463,6 +3508,7 @@ function Rentals({ facility, data, update }) {
   return (
     <div>
       <SectionHead title="Equipment rentals" right={<div className="flex items-center gap-2 flex-wrap">
+        <SearchJump placeholder="Search item, resident, room" items={activeItems.map(it=>({ label:it.item||it.category||"(item)", sub:[it.resident,it.room].filter(Boolean).join("  ·  "), domId:"rent-"+it.id }))} />
         <button onClick={exportRentals} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm shrink-0" style={{ border: `1px solid ${BRAND.line}`, background: "#fff" }}>Export (CSV)</button>
         <AddBtn onClick={() => setModal({})}>Add item</AddBtn>
       </div>}
@@ -3472,7 +3518,7 @@ function Rentals({ facility, data, update }) {
           {[...activeItems].sort((a, b) => ({ gone: 0, buy: 1, consider: 2, rent: 3, none: 4, done: 5 }[recFor(a).rec] - { gone: 0, buy: 1, consider: 2, rent: 3, none: 4, done: 5 }[recFor(b).rec])).map((it) => {
             const d = recFor(it), r = RENTAL_REC[d.rec];
             return (
-              <tr key={it.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
+              <tr key={it.id} id={"rent-"+it.id} className="group" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
                 <Td><div className="font-medium">{it.resident || "—"}</div><div className="text-xs" style={{ color: BRAND.inkSoft }}>{it.room}</div></Td>
                 <Td><div>{it.equipment}</div>{it.comments ? <div className="text-xs" style={{ color: BRAND.inkSoft, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={it.comments}>{it.comments}</div> : null}</Td><Td soft>{it.category}</Td>
                 <Td><Pill tone={RENT_STATUS_TONE[rentStatusOf(it)] || TONE.idle}>{rentStatusOf(it)}</Pill></Td>
