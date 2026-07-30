@@ -2631,8 +2631,8 @@ function RehospModule({ facility, isAdmin }) {
                       <div style={{ fontSize: 11, color: BRAND.inkSoft, whiteSpace: "nowrap" }}>Room {ev.r.room} · {ev.r.payer || "—"}</div>
                     </td>
                     <td className="px-3 py-2.5">
-                      <div style={{ whiteSpace: "nowrap" }}>{ev.hosp.date || "—"}</div>
-                      <div style={{ fontSize: 11, color: BRAND.inkSoft, whiteSpace: "nowrap" }} title={bbShift(ev.hosp.time)}>{bbDayOfWeek(ev.hosp.date)}{ev.hosp.time ? ` · ${ev.hosp.time}` : ""} · {bbShift(ev.hosp.time).split(" (")[0]}</div>
+                      <div style={{ whiteSpace: "nowrap" }} title={bbShift(ev.hosp.time)}>{bbDayOfWeek(ev.hosp.date)} · {bbShift(ev.hosp.time).split(" (")[0]}</div>
+                      <div style={{ fontSize: 11, color: BRAND.inkSoft, whiteSpace: "nowrap" }}>{ev.hosp.date || "—"}{ev.hosp.time ? ` · ${ev.hosp.time}` : ""}</div>
                     </td>
                     <td className="px-3 py-2.5">
                       <div style={{ whiteSpace: "nowrap" }}>{ev.hosp.sentBy || "—"}</div>
