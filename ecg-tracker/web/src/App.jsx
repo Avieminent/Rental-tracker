@@ -1135,12 +1135,17 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     const left = bedboardStore.getLeft(facility);
     const hosp = rows.filter(r => !r._left && r.status === "Hospitalization")
       .map(r => ({ name: r.name, room: r.room, date: r.hosp?.date || "", bedhold: r.hosp?.bedhold === "Y" ? "Y" : "N" }));
-    const discharges = left.filter(p => p.leftReason === "Discharged" && p.leftDate === iso)
+    // Same rule as the app's boxes: exporting TODAY = everything LOGGED today (incl.
+    // backfills, amber); exporting a past date = what happened ON that day (amber if logged late).
+    const isToday = iso === todayISO();
+    const leftMatch = (p) => isToday ? p.leftLogged === iso : p.leftDate === iso;
+    const discharges = left.filter(p => p.leftReason === "Discharged" && leftMatch(p))
       .map(p => ({ name: p.name, room: p.room, date: p.leftDate, to: p.leftDetail?.dischargedTo || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
-    const deaths = left.filter(p => p.leftReason === "Deceased" && p.leftDate === iso)
+    const deaths = left.filter(p => p.leftReason === "Deceased" && leftMatch(p))
       .map(p => ({ name: p.name, room: p.room, date: p.leftDate, cause: p.leftDetail?.cause || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
     const changes = [];
-    const scan = (r, nm, rm) => (r.payerLog || []).forEach(c => { if (c.date === iso) changes.push({ name: nm, room: rm, kind: c.kind || "payer", from: c.from, to: c.to, date: c.date, loggedDate: c.loggedDate || c.date, hl: c.loggedDate && c.loggedDate !== c.date }); });
+    const chMatch = (c) => isToday ? (c.loggedDate || c.date) === iso : c.date === iso;
+    const scan = (r, nm, rm) => (r.payerLog || []).forEach(c => { if (chMatch(c)) changes.push({ name: nm, room: rm, kind: c.kind || "payer", from: c.from, to: c.to, date: c.date, loggedDate: c.loggedDate || c.date, hl: c.loggedDate && c.loggedDate !== c.date }); });
     res.forEach(r => r.name && scan(r, r.name, r.room));
     left.forEach(p => scan(p, p.name, p.room));
     const mix = {};
@@ -1439,12 +1444,10 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           </div>
 
           <div className="flex flex-col gap-3">
+            <ColorKey />
             <Legend res={displayRes} />
             <CensusTiles counts={counts} />
             <PayerChanges res={res} facility={facility} viewDate={viewing ? viewDate : null} />
-            <ColorKey />
-            <Section title="Activity report — today" cols={["Name","Time","Type","Room","Payer"]}
-              rows={activity(res)} />
             <Section title="Pending admissions" cols={["Name","M/F","From","Payer","Target"]}
               rows={res.filter(r=>r.status==="Admitting").map(r=>[r.name||"(new)", r.mf, "", r.payer, r.room])} empty="none" />
             <Section title="Pending discharges" cols={["Name","Room","Target","Discharged to"]}
@@ -1606,17 +1609,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   );
 }
 
-function activity(res){
-  // simple derived "today" activity from residents currently out/terminal
-  const out=[];
-  res.forEach(r=>{
-    if(r.status==="Admitting") out.push([r.name||"(new)","","Admit",r.room,r.payer]);
-    if(r.status==="Hospitalization") out.push([r.name,r.hosp.time||"","Hospitalization",r.room,r.payer]);
-    if(r.status==="Discharged") out.push([r.name,r.disc.time||"","Discharge",r.room,r.payer]);
-    if(r.status==="Deceased") out.push([r.name,r.death.time||"","Death",r.room,r.payer]);
-  });
-  return out;
-}
+
 
 function Card({ title, children }){
   return (
@@ -1909,6 +1902,21 @@ async function buildBedboardWorkbook(facilityName, iso, rows, counts, boxes) {
       });
       br++; // gap
     };
+    boxHeader("Status color key");
+    {
+      const KEYS = ["Active","Admitting","Hospitalization","Discharged","Deceased","Available","Blocked","Iso","COVID+","Room Move"];
+      for (let i = 0; i < KEYS.length; i += 2) {
+        [KEYS[i], KEYS[i+1]].forEach((k, side) => {
+          if (!k) return;
+          const c = ws.getCell(br, 15 + side*2);
+          c.value = k; c.font = { name:"Arial", size:9, color:{ argb: INK } };
+          c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: TINT[k] || "FFFFFFFF" } };
+          c.border = border;
+        });
+        br++;
+      }
+      br++;
+    }
     boxHeader("In hospital");
     boxRows(["Name","Room","Since","Bedhold"], (boxes.hosp||[]).map(x=>[x.name,x.room,x.date,x.bedhold]));
     boxHeader("Discharges — " + iso);
