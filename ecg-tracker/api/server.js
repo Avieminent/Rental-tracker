@@ -82,7 +82,7 @@ const rateLimitLogin = makeLimiter(10, 15 * 60 * 1000, "Too many sign-in attempt
 const rateLimitReset = makeLimiter(5, 15 * 60 * 1000, "Too many password-reset requests.");
 
 // ---- Email via Microsoft 365 (Graph, client-credentials) ----
-async function sendMail(to, subject, html) {
+async function sendMail(to, subject, html, attachments) {
   if (!mailConfigured) { console.warn("Email not configured; skipping send to", to); return false; }
   const tokenRes = await fetch(`https://login.microsoftonline.com/${MAIL.tenant}/oauth2/v2.0/token`, {
     method: "POST",
@@ -105,6 +105,12 @@ async function sendMail(to, subject, html) {
           body: { contentType: "HTML", content: html },
           from: { emailAddress: { name: MAIL.fromName, address: MAIL.from } },
           toRecipients: [{ emailAddress: { address: to } }],
+          ...(Array.isArray(attachments) && attachments.length ? { attachments: attachments.map(a => ({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            name: a.name,
+            contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            contentBytes: a.contentBase64,
+          })) } : {}),
         },
         saveToSentItems: false,
       }),
@@ -233,6 +239,61 @@ app.get("/api/bootstrap", authenticate, wrap(async (req, res) => {
 }));
 
 /* ---------- generic records (every module) ---------- */
+// ---- Census "update done" email: per-facility recipient list + send with the bedboard attached ----
+const RECIP_MODULE = "census", RECIP_COLLECTION = "email-recipients";
+async function getRecipients(facilityId) {
+  const { rows } = await pool.query(
+    "select id, data from record where facility_id = $1 and module = $2 and collection = $3 limit 1",
+    [facilityId, RECIP_MODULE, RECIP_COLLECTION]
+  );
+  return rows[0] ? { id: rows[0].id, emails: Array.isArray(rows[0].data?.emails) ? rows[0].data.emails : [] } : { id: null, emails: [] };
+}
+
+app.get("/api/census-recipients/:facilityId", authenticate, wrap(async (req, res) => {
+  if (req.user.role !== "admin") throw httpError(403, "Administrators only.");
+  res.json({ emails: (await getRecipients(req.params.facilityId)).emails });
+}));
+
+app.put("/api/census-recipients/:facilityId", authenticate, wrap(async (req, res) => {
+  if (req.user.role !== "admin") throw httpError(403, "Administrators only.");
+  const emails = (Array.isArray(req.body?.emails) ? req.body.emails : [])
+    .map(e => String(e || "").trim().toLowerCase()).filter(e => /.+@.+\..+/.test(e)).slice(0, 50);
+  const existing = await getRecipients(req.params.facilityId);
+  if (existing.id) await pool.query("update record set data = $2 where id = $1", [existing.id, { emails }]);
+  else await pool.query("insert into record (facility_id, module, collection, data) values ($1,$2,$3,$4)",
+    [req.params.facilityId, RECIP_MODULE, RECIP_COLLECTION, { emails }]);
+  res.json({ ok: true, emails });
+  auditReq(req, "update", { facilityId: req.params.facilityId, module: RECIP_MODULE, detail: "email recipients" });
+}));
+
+app.post("/api/census-done", authenticate, wrap(async (req, res) => {
+  const { facilityId, facilityName, dateISO, summary, xlsxBase64 } = req.body || {};
+  if (!facilityId || !dateISO) throw httpError(400, "facilityId and dateISO are required.");
+  assertFacility(req.user, facilityId);
+  // Census page access: admins/corporate, or facility users whose page list includes census.
+  if (req.user.role === "facility" && Array.isArray(req.user.pages) && !req.user.pages.includes("census"))
+    throw httpError(403, "You don't have access to the census page.");
+  const { emails } = await getRecipients(facilityId);
+  if (!emails.length) throw httpError(400, "No recipients are set up for this facility yet. An administrator can add them under Census emails.");
+  const when = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" });
+  const sum = summary || {};
+  const html = `
+    <p><b>${facilityName || facilityId}</b> — census updated for <b>${dateISO}</b>.</p>
+    <p>Marked done by ${req.user.email} at ${when} (ET).</p>
+    <table cellpadding="6" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">
+      <tr><td><b>Occupied</b></td><td>${sum.occ ?? "—"}</td><td><b>Available</b></td><td>${sum.avail ?? "—"}</td></tr>
+      <tr><td><b>In hospital</b></td><td>${sum.hosp ?? "—"}</td><td><b>Bedhold</b></td><td>${sum.bh ?? "—"}</td></tr>
+      <tr><td><b>Admitted today</b></td><td>${sum.admits ?? "—"}</td><td><b>Left today</b></td><td>${sum.left ?? "—"}</td></tr>
+    </table>
+    <p>The full bed board is attached.</p>`;
+  const attachments = xlsxBase64 ? [{ name: `Bedboard_${String(facilityName||facilityId).replace(/\s+/g,"_")}_${dateISO}.xlsx`, contentBase64: xlsxBase64 }] : [];
+  let sent = 0;
+  for (const to of emails) { try { if (await sendMail(to, `${facilityName || "Facility"} census updated — ${dateISO}`, html, attachments)) sent++; } catch (e) { console.error("census-done mail failed for", to, e.message); } }
+  if (!sent) throw httpError(502, "The email could not be sent. Check the mail configuration.");
+  res.json({ ok: true, sent, of: emails.length });
+  auditReq(req, "update", { facilityId, module: "census", detail: `update-done email to ${sent}/${emails.length}` });
+}));
+
 app.post("/api/records", authenticate, wrap(async (req, res) => {
   const { module, collection, facilityId, data } = req.body || {};
   if (!module || !collection || !facilityId) throw httpError(400, "module, collection and facilityId are required.");
