@@ -2764,6 +2764,7 @@ const monthKey = () => todayISO().slice(0, 7);
 function RFMSModule({ facility, canSign }) {
   const [res, setRes] = useBedboard(facility.name);
   const [filter, setFilter] = useState("all");
+  const [alertsOpen, setAlertsOpen] = useState(false); // Action needed starts folded
   const [spendFor, setSpendFor] = useState(null);
 
   const leftPeople = bedboardStore.getLeft(facility.name).map(p => ({
@@ -2865,10 +2866,16 @@ function RFMSModule({ facility, canSign }) {
       </div>
 
       {alerts.length > 0 && (
-        <div className="rounded-xl px-4 py-3 mb-4" style={{ background: "#fdeceb", border: "1px solid #eec4c0" }}>
-          <div className="text-xs uppercase tracking-wider mb-1" style={{ color: "#c0392b", fontWeight: 600 }}>Action needed</div>
-          {alerts.map((a, i) => (
-            <div key={i} className="text-sm py-0.5" style={{ color: a.tone === "bad" ? "#c0392b" : "#8a6d3f" }}>• {a.text}</div>
+        <div className="rounded-xl px-4 py-3 mb-4" role="button" onClick={() => setAlertsOpen(o => !o)}
+          style={{ background: "#fdeceb", border: "1px solid #eec4c0", cursor: "pointer" }}>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-wider" style={{ color: "#c0392b", fontWeight: 600 }}>
+              Action needed ({alerts.length})
+            </div>
+            <div style={{ fontSize: 11, color: "#c0392b" }}>{alertsOpen ? "hide ▴" : "show ▾"}</div>
+          </div>
+          {alertsOpen && alerts.map((a, i) => (
+            <div key={i} className="text-sm py-0.5" style={{ color: a.tone === "bad" ? "#c0392b" : "#8a6d3f", marginTop: i === 0 ? 6 : 0 }}>• {a.text}</div>
           ))}
         </div>
       )}
