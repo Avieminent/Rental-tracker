@@ -161,6 +161,10 @@ app.post("/api/login", rateLimitLogin, wrap(async (req, res) => {
   const { email, password, remember } = req.body || {};
   const { rows } = await pool.query("select * from app_user where lower(email) = lower($1)", [email || ""]);
   const u = rows[0];
+  if (u && u.password_hash === "invited") {
+    await writeAudit({ userId: u.id, email: u.email, action: "login_failed", detail: "invite not yet accepted" });
+    throw httpError(401, "This account hasn't been set up yet — use the invite link in your email (or ask an administrator to resend it).");
+  }
   if (!u || !(await bcrypt.compare(password || "", u.password_hash))) {
     await writeAudit({ email: (email || "").trim() || null, action: "login_failed", detail: "invalid credentials" });
     throw httpError(401, "Invalid credentials.");
@@ -173,6 +177,23 @@ app.post("/api/login", rateLimitLogin, wrap(async (req, res) => {
 }));
 
 app.get("/api/me", authenticate, (req, res) => res.json({ user: req.user }));
+
+/* ---------- invites (invite-only user creation) ---------- */
+async function sendInvite(u) {
+  const token = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+  await pool.query("insert into password_reset (token_hash, user_id, expires_at) values ($1,$2,$3)", [hash, u.id, expires]);
+  const link = `${APP_URL}/?reset=${token}`;
+  await sendMail(
+    u.email,
+    "You've been added to Eminent Central",
+    `<p>A login has been created for you on <b>Eminent Central</b>, Eminent Care Group's operations platform.</p>
+     <p><a href="${link}">Click here to choose your password</a> — this link is valid for 7 days and can be used once.</p>
+     <p>After setting your password, sign in at <a href="${APP_URL}">${APP_URL}</a> with this email address.</p>`
+  );
+  await writeAudit({ userId: u.id, email: u.email, action: "user.invite_sent" });
+}
 
 /* ---------- forgot / reset password ---------- */
 app.post("/api/forgot", rateLimitReset, async (req, res) => {
@@ -352,7 +373,7 @@ app.patch("/api/facilities/:fid", authenticate, wrap(async (req, res) => {
 const ROLES = ["admin", "corporate", "facility"];
 const PAGE_KEYS = ["roster", "census", "rehosp", "rfms", "staffing", "budget", "rentals", "rfms:sign"]; // rfms:sign = permission to sign RFMS spend-downs
 const cleanPages = (v) => Array.isArray(v) ? v.filter((k) => PAGE_KEYS.includes(k)) : null;
-const toUser = (r) => ({ id: r.id, email: r.email, role: r.role, facilityId: r.facility_id, facilityName: r.facility_name || null, pages: r.pages || null });
+const toUser = (r) => ({ id: r.id, email: r.email, role: r.role, facilityId: r.facility_id, facilityName: r.facility_name || null, pages: r.pages || null, invited: r.invited === true });
 
 function roleScope(role, facilityId) {
   if (!ROLES.includes(role)) throw httpError(400, "Unknown role.");
@@ -365,7 +386,7 @@ function roleScope(role, facilityId) {
 
 app.get("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   const { rows } = await pool.query(
-    `select u.id, u.email, u.role, u.facility_id, f.name as facility_name
+    `select u.id, u.email, u.role, u.facility_id, f.name as facility_name, (u.password_hash = 'invited') as invited
        from app_user u left join facility f on f.id = u.facility_id
       order by case u.role when 'admin' then 0 when 'corporate' then 1 else 2 end, u.email`
   );
@@ -373,12 +394,11 @@ app.get("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
 }));
 
 app.post("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
-  const { email, role, facilityId, password, pages } = req.body || {};
+  const { email, role, facilityId, pages } = req.body || {};
   if (!email || !String(email).trim()) throw httpError(400, "Email is required.");
-  if (!password || String(password).length < 8) throw httpError(400, "Password must be at least 8 characters.");
   const fid = roleScope(role, facilityId);
   const pageList = role === "admin" ? null : cleanPages(pages); // admin: all pages; facility/corporate: their list (may carry rfms:sign)
-  const hash = await bcrypt.hash(String(password), 10);
+  const hash = "invited"; // no password until the invite link is used
   let rows;
   try {
     ({ rows } = await pool.query(
@@ -390,19 +410,34 @@ app.post("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
     throw e;
   }
   const { rows: f } = await pool.query("select name from facility where id = $1", [fid]);
-  res.status(201).json(toUser({ ...rows[0], facility_name: f[0]?.name }));
-  auditReq(req, "user.create", { facilityId: fid, detail: `${rows[0].email} (${rows[0].role})` });
+  let emailFailed = false;
+  try { await sendInvite(rows[0]); } catch (e) { emailFailed = true; console.error("invite mail:", e.message); }
+  res.status(201).json({ ...toUser({ ...rows[0], facility_name: f[0]?.name }), invited: true, emailFailed });
+  auditReq(req, "user.create", { facilityId: fid, detail: `${rows[0].email} (${rows[0].role}) — invite ${emailFailed ? "FAILED to send" : "emailed"}` });
 }));
 
-app.patch("/api/users/:id/password", authenticate, requireAdmin, wrap(async (req, res) => {
-  const { password } = req.body || {};
-  if (!password || String(password).length < 8) throw httpError(400, "Password must be at least 8 characters.");
-  const hash = await bcrypt.hash(String(password), 10);
-  const { rows } = await pool.query("update app_user set password_hash = $2 where id = $1 returning email", [req.params.id, hash]);
-  if (!rows[0]) throw httpError(404, "Login not found.");
-  res.json({ ok: true });
-  auditReq(req, "user.reset_password", { detail: rows[0].email });
+// Resend the sign-in link: a fresh invite for pending users, a standard reset for active ones.
+app.post("/api/users/:id/invite", authenticate, requireAdmin, wrap(async (req, res) => {
+  const { rows } = await pool.query("select * from app_user where id = $1", [req.params.id]);
+  const u = rows[0];
+  if (!u) throw httpError(404, "No such login.");
+  if (u.password_hash === "invited") {
+    await sendInvite(u);
+  } else {
+    const token = crypto.randomBytes(32).toString("hex");
+    const hash = crypto.createHash("sha256").update(token).digest("hex");
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    await pool.query("insert into password_reset (token_hash, user_id, expires_at) values ($1,$2,$3)", [hash, u.id, expires]);
+    await sendMail(u.email, "Reset your Eminent Central password",
+      `<p>An administrator sent you a password reset link for Eminent Central.</p>
+       <p><a href="${APP_URL}/?reset=${token}">Choose a new password</a> — this link expires in 1 hour and can be used once.</p>`);
+    await writeAudit({ userId: u.id, email: u.email, action: "password.forgot_sent", detail: "sent by admin" });
+  }
+  res.json({ ok: true, invited: u.password_hash === "invited" });
 }));
+
+// (removed: manual admin password setting — invite-only; use POST /api/users/:id/invite)
+
 
 app.delete("/api/users/:id", authenticate, requireAdmin, wrap(async (req, res) => {
   if (req.params.id === req.user.id) throw httpError(400, "You can't delete your own login.");
