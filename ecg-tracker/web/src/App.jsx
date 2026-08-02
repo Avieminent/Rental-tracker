@@ -4481,17 +4481,14 @@ function ResetPassword({ token }) {
 }
 
 /* ============================ Login manager (admin) ============================ */
-const genPw = () => Math.random().toString(36).slice(2, 6) + "-" + Math.random().toString(36).slice(2, 6);
 const ROLE_LABEL = { admin: "Administrator", corporate: "Corporate", facility: "Facility" };
 function UserManager({ facilities, meId, onClose }) {
   const [users, setUsers] = useState(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState(null);
-  const [resetId, setResetId] = useState(null);
-  const [resetPw, setResetPw] = useState("");
   const PAGE_OPTS = MODULES.map((m) => ({ key: m.key, label: m.label }));
-  const [form, setForm] = useState({ email: "", role: "facility", facilityId: facilities[0]?.id || "", password: genPw(), pages: MODULES.map((m) => m.key) });
+  const [form, setForm] = useState({ email: "", role: "facility", facilityId: facilities[0]?.id || "", pages: MODULES.map((m) => m.key) });
   const [pagesId, setPagesId] = useState(null);
   const [pagesSel, setPagesSel] = useState([]);
   const togglePage = (arr, k) => arr.includes(k) ? arr.filter((x) => x !== k) : [...arr, k];
@@ -4506,15 +4503,10 @@ function UserManager({ facilities, meId, onClose }) {
   const add = async () => {
     setErr(""); setBusy(true);
     try {
-      const u = await api("/api/users", "POST", { email: form.email.trim(), role: form.role, facilityId: form.role === "facility" ? form.facilityId : null, pages: form.role !== "admin" ? form.pages : null, password: form.password });
-      setUsers((l) => [u, ...(l || [])]); setCreated({ email: u.email, password: form.password });
-      setForm({ email: "", role: "facility", facilityId: facilities[0]?.id || "", password: genPw(), pages: MODULES.map((m) => m.key) });
+      const u = await api("/api/users", "POST", { email: form.email.trim(), role: form.role, facilityId: form.role === "facility" ? form.facilityId : null, pages: form.role !== "admin" ? form.pages : null });
+      setUsers((l) => [u, ...(l || [])]); setCreated({ email: u.email, emailFailed: !!u.emailFailed });
+      setForm({ email: "", role: "facility", facilityId: facilities[0]?.id || "", pages: MODULES.map((m) => m.key) });
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
-  };
-  const doReset = async (id, email) => {
-    setBusy(true); setErr("");
-    try { await api(`/api/users/${id}/password`, "PATCH", { password: resetPw }); setCreated({ email, password: resetPw }); setResetId(null); setResetPw(""); }
-    catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
   const remove = async (id) => { setBusy(true); setErr(""); try { await api(`/api/users/${id}`, "DELETE"); setUsers((l) => l.filter((x) => x.id !== id)); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
   return (
@@ -4556,12 +4548,14 @@ function UserManager({ facilities, meId, onClose }) {
             <div className="text-[11px] mt-1" style={{ color: BRAND.inkSoft }}>All pages are on by default — untick any this person shouldn't see.</div>
           </div>
         )}
-        <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Temporary password</span>
-          <div className="flex gap-2"><input style={inpStyle} value={form.password} onChange={(e) => set("password", e.target.value)} />
-            <button onClick={() => set("password", genPw())} className="shrink-0 px-3 rounded-lg text-xs" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.inkSoft }}>New</button></div></label>
+        <div className="mb-3 text-[12px] rounded-lg px-3 py-2" style={{ background: "#fdf4dd", border: "1px solid #d9c489", color: "#6b5a22" }}>
+            They'll get an <b>invite email</b> with a link to choose their own password (valid 7 days). No password to share.
+          </div>
         {err && <div className="text-xs mb-2" style={{ color: TONE.bad.fg }}>{err}</div>}
         <div className="flex justify-end"><button disabled={busy} onClick={add} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm text-white" style={{ background: BRAND.ink, opacity: busy ? 0.6 : 1 }}><Plus size={15} /> Create login</button></div>
-        {created && <div className="mt-3 rounded-lg px-4 py-3 text-sm" style={{ background: TONE.ok.bg, color: TONE.ok.fg }}>Share once, then have them change it: <b>{created.email}</b> · password <span className="font-mono">{created.password}</span> <button onClick={() => setCreated(null)} className="underline ml-2">dismiss</button></div>}
+        {created && <div className="mt-3 rounded-lg px-4 py-3 text-sm" style={{ background: created.emailFailed ? "#fdeceb" : TONE.ok.bg, color: created.emailFailed ? "#c0392b" : TONE.ok.fg }}>{created.emailFailed
+            ? <>The login for <b>{created.email}</b> was created, but the invite email could not be sent — use "Email sign-in link" on their row to retry.</>
+            : <>Invite emailed to <b>{created.email}</b> — they'll set their own password from the link (valid 7 days).</>} <button onClick={() => setCreated(null)} className="underline ml-2">dismiss</button></div>}
       </div>
       <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${BRAND.line}` }}>
         {users === null ? <div className="px-4 py-5 text-sm" style={{ color: BRAND.inkSoft }}>Loading…</div>
@@ -4569,18 +4563,12 @@ function UserManager({ facilities, meId, onClose }) {
             <div key={u.id} className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
               <div className="min-w-0"><div className="text-sm truncate">{u.email}{u.id === meId && <span className="text-[11px] ml-2" style={{ color: BRAND.inkSoft }}>(you)</span>}</div>
                 <div className="text-[11px] uppercase tracking-wider mt-0.5" style={{ color: BRAND.inkSoft }}>{ROLE_LABEL[u.role]}{u.role === "facility" && u.facilityName ? ` · ${u.facilityName}` : ""}</div></div>
-              {resetId === u.id ? (
-                <div className="flex items-center gap-2 shrink-0"><input style={{ ...inpStyle, width: 140 }} value={resetPw} onChange={(e) => setResetPw(e.target.value)} placeholder="new password" />
-                  <button onClick={() => setResetPw(genPw())} className="px-2 rounded-lg text-xs" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.inkSoft }}>New</button>
-                  <button disabled={resetPw.length < 8} onClick={() => doReset(u.id, u.email)} className="px-3 py-1.5 rounded-lg text-xs text-white" style={{ background: BRAND.ink, opacity: resetPw.length < 8 ? 0.5 : 1 }}>Save</button>
-                  <button onClick={() => { setResetId(null); setResetPw(""); }} className="text-xs" style={{ color: BRAND.inkSoft }}>Cancel</button></div>
-              ) : (
-                <div className="flex items-center gap-1 shrink-0">
-                  {(u.role === "facility" || u.role === "corporate") && <button onClick={() => { setPagesId(u.id); setPagesSel(Array.isArray(u.pages) ? u.pages : MODULES.map((m) => m.key)); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: BRAND.inkSoft }}><Building2 size={14} /> Pages</button>}
-                  <button onClick={() => { setResetId(u.id); setResetPw(genPw()); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: BRAND.inkSoft }}><KeyRound size={14} /> Reset</button>
-                  {u.id !== meId && <button onClick={() => remove(u.id)} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs" style={{ color: TONE.bad.fg }}><Trash2 size={14} /> Remove</button>}
-                </div>
-              )}
+              {u.invited && <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background:"#fdf4dd", color:"#8a6d1f", border:"1px solid #d9c489" }}>Invite pending</span>}
+              <button onClick={async () => { setErr(""); try { await api(`/api/users/${u.id}/invite`, "POST", {}); setCreated({ email: u.email, emailFailed: false, resend: true }); } catch (e) { setErr(e.message); } }}
+                className="px-3 py-1.5 rounded-lg text-xs shrink-0" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.ink }}
+                title={u.invited ? "Resend the invite email (new 7-day link)" : "Email them a password reset link (1 hour)"}>
+                Email sign-in link
+              </button>
               {pagesId === u.id && (
                 <div className="w-full basis-full mt-2 rounded-lg px-3 py-3" style={{ background: BRAND.paper, border: `1px solid ${BRAND.line}` }}>
                   <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: BRAND.inkSoft }}>Permissions for {u.email}</div>
