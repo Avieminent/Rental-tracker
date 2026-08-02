@@ -141,7 +141,7 @@ const RI = (o) => ({ id: uid(), vendor: "", comments: "", ...o });
 /* ============================ App shell ============================ */
 /* ============================ Config-driven trackers ============================ */
 const FACILITY_META = {"Eden": {"beds": "97 beds", "rdo": "Shala Currey", "rdcs": "Christina Delisio", "nha": "Hannah Neal", "don": "Monica McWilson", "survey": "🟡 Monitoring", "ratingOverall": 1, "ratingStaffing": 2, "totalStaff": "35.5", "openRoles": "1"}, "Highland Park": {"beds": "80 Beds", "rdo": "Shala Currey", "rdcs": "Christina Delisio", "nha": "Blake Apsokardu", "don": "Bernadine \"Dina\" Billings", "survey": "🟡 Annual Survey Overdue", "ratingOverall": 5, "ratingStaffing": 2, "totalStaff": "29", "openRoles": "0"}, "The Pearl": {"beds": "— (confirm)", "rdo": "Shala Currey", "rdcs": "Christina Delisio", "nha": "[OPEN — NHA Vacant]", "don": "Tiffany Johnson", "survey": "🟡 Active Monitoring", "ratingOverall": 1, "ratingStaffing": 1, "totalStaff": "0", "openRoles": "2"}, "Champion City": {"beds": "187 beds", "rdo": "Shala Currey", "rdcs": "Christina Delisio", "nha": "Maribeth Tarpley", "don": "Cerise Roberts", "survey": "🟡 Active Monitoring", "ratingOverall": 1, "ratingStaffing": 1, "totalStaff": "49", "openRoles": "3"}, "Alpine": {"beds": "99 beds", "rdo": "Stacie Atherton", "rdcs": "Amanda Seibert", "nha": "Jazmaine \"Jaz\" Smith", "don": "Angie Ivey", "survey": "🟡 Annual Survey Due", "ratingOverall": 3, "ratingStaffing": 2, "totalStaff": "31", "openRoles": "1"}, "Aristos": {"beds": "56 beds", "rdo": "Stacie Atherton", "rdcs": "Amanda Seibert", "nha": "Yehuda Biren", "don": "— OPEN —", "survey": "🔴 Active Citations — Verify CMP Status", "ratingOverall": 3, "ratingStaffing": 1, "totalStaff": "4", "openRoles": "2"}, "Aspen Glen": {"beds": "67 beds", "rdo": "Stacie Atherton", "rdcs": "Amanda Seibert", "nha": "Stephanie Wolfe", "don": "Ashley Scafide", "survey": "— New to Eminent · Confirm w/ Stacie Atherton", "ratingOverall": 5, "ratingStaffing": 2, "totalStaff": "0", "openRoles": "9"}};
-const OPTS = {"Payer Type": ["Medicare A", "Medicare B", "Managed Care / MA", "Medicaid", "Medicaid Pending", "ISNP", "Hospice", "Private Pay / Co-pay", "VA", "Commercial", "Other"], "Transfer Type": ["ED - Treat & Return", "Observation", "Inpatient Admission"], "Primary Reason": ["CHF / Fluid Overload", "Sepsis / Infection", "Pneumonia / Respiratory", "COPD / Resp Distress", "UTI", "Altered Mental Status", "Fall / Fracture / Injury", "GI / Dehydration", "Cardiac / Chest Pain", "Stroke / Neuro", "Wound", "Psych / Behavioral", "Other"], "Outcome": ["Returned to SNF", "Admitted - not returned", "Discharged home from hospital", "Expired", "Pending"], "Status": ["Open", "In Progress", "Submitted", "Appealed", "Denied", "Partial Pay", "Paid", "Resolved", "Write-Off"], "Priority": ["Critical", "High", "Normal"]};
+const OPTS = {"Payer Type": ["Medicare A", "Medicare B", "Managed Medicare", "Medicaid", "Medicaid Pending", "ISNP", "Hospice", "Private Pay / Co-pay", "VA", "Commercial", "Other"], "Transfer Type": ["ED - Treat & Return", "Observation", "Inpatient Admission"], "Primary Reason": ["CHF / Fluid Overload", "Sepsis / Infection", "Pneumonia / Respiratory", "COPD / Resp Distress", "UTI", "Altered Mental Status", "Fall / Fracture / Injury", "GI / Dehydration", "Cardiac / Chest Pain", "Stroke / Neuro", "Wound", "Psych / Behavioral", "Other"], "Outcome": ["Returned to SNF", "Admitted - not returned", "Discharged home from hospital", "Expired", "Pending"], "Status": ["Open", "In Progress", "Submitted", "Appealed", "Denied", "Partial Pay", "Paid", "Resolved", "Write-Off"], "Priority": ["Critical", "High", "Normal"]};
 const opt = (k, fb) => (OPTS[k] && OPTS[k].length ? OPTS[k] : fb);
 const diffDays = (a, b) => { if (!a || !b) return null; const d = (new Date(b) - new Date(a)) / 86400000; return isNaN(d) ? null : Math.round(d); };
 const yesNoTone = (v) => (v === "Yes" ? TONE.bad : v === "No" ? TONE.ok : TONE.idle);
@@ -556,9 +556,9 @@ const genderDictates = (r) => !!(r && r.name && !r._left && (IN_FACILITY.include
 const holdsBed = (r) => IN_FACILITY.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold==="Y");
 // blocksBed: the bed cannot be given to a new resident. Everything that holds a bed blocks it,
 // plus "no bedhold but expected to return" — vacant for census/billing, but reserved until resolved.
-const blocksBed = (r) => holdsBed(r) || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y");
+const blocksBed = (r) => holdsBed(r) || r.status==="Blocked" || (r.status==="Hospitalization" && r.hosp?.bedhold!=="Y" && r.hosp?.expectedReturn==="Y");
 
-const PAYERS = [["Medicare A","MCA"],["Medicare Replacement","MR"],["Medicaid","MCD"],["Managed Medicaid","MM"],["Medicaid Pending","MP"],["Private Insurance","PI"],["Private Pay","PP"],["Medicaid Hospice","HM"],["Hospice Private","HP"],["LOA","LOA"],["Other","OTH"]];
+const PAYERS = [["Medicare A","MCA"],["Managed Medicare","MR"],["Medicaid","MCD"],["Managed Medicaid","MM"],["Medicaid Pending","MP"],["Private Insurance","PI"],["Private Pay","PP"],["Medicaid Hospice","HM"],["Hospice Private","HP"],["LOA","LOA"],["Other","OTH"]];
 const nowHM = () => new Date().toTimeString().slice(0,5);
 
 /* Shared in-session store: the bedboard writes here, other pages read here.
@@ -584,7 +584,7 @@ const bedboardStore = {
     const ppl = this.people[fac] || {};
     return (this.beds[fac] || []).map(b => {
       const p = b.residentId ? ppl[b.residentId] : null;
-      if (!p) return { id: b.id, wing: b.wing, room: b.room, residentId: null, name: "", status: "Available", mf: "", vent: false, payer: "", hosp: {}, disc: {}, death: {} };
+      if (!p) return { id: b.id, wing: b.wing, room: b.room, residentId: null, name: "", status: b.blocked ? "Blocked" : "Available", mf: "", vent: false, payer: "", hosp: {}, disc: {}, death: {} };
       return { ...p, id: b.id, wing: b.wing, room: b.room, residentId: p.id };
     });
   },
@@ -604,6 +604,7 @@ const bedboardStore = {
         bed.residentId = pid;
       } else {
         bed.residentId = null; // bed emptied; the person record (if any) stays in the base
+        bed.blocked = row.status === "Blocked" || undefined; // Blocked lives on the bed itself
       }
     });
   },
@@ -1017,6 +1018,17 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   // (nobody changed the board), carry forward the most recent snapshot on/before it —
   // because the board looked the same as the last day it was saved.
   const snapForDate = bbSnapForDate;
+  // Left strip color: the room's gender — the resident's own, or (for open beds) a roommate's.
+  const genderBar = (r, all) => {
+    const own = (!r._left && genderDictates(r) && r.mf) ? r.mf : null;
+    let g = own;
+    if (!g) {
+      const k = roomKeyOf(r.wing, r.room);
+      const hit = all.find((x) => x.id !== r.id && !x._left && roomKeyOf(x.wing, x.room) === k && genderDictates(x) && x.mf);
+      g = hit ? hit.mf : null;
+    }
+    return g === "M" ? "#7da7d9" : g === "F" ? "#d99ab5" : "#ffffff";
+  };
   const _snap = viewing ? snapForDate(facility, viewDate) : { rows: res, actual: true, asOf: viewDate };
   // Overlay: residents who LEFT (discharged/deceased/hosp-gone) show on the census for their event day.
   // If their old bed is empty that day they appear in it; if it was refilled, they show as an extra row.
@@ -1074,6 +1086,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     }
     if (status === "Room Move") { setShuffleFor(id); return; }
     if (status === "Available") {
+      if (row && !row.name && row.status === "Blocked") { applyStatus(id, "Available"); return; } // un-block
       if (!row || !row.name) return; // already empty — nothing to do
       setAvailFor(id); return;
     }
@@ -1139,7 +1152,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     let cm = 0, cf = 0, cv = 0;
     rows.forEach(r => { if (r._left) return; if (IN_FACILITY.includes(r.status)) { if (r.mf === "M") cm++; if (r.mf === "F") cf++; } if (r.vent) cv++; });
     const census = [["Male", cm], ["Female", cf], ["Vent", cv]];
-    return { hosp, discharges, deaths, changes, payerMix, admissions, pending: [], census };
+    return { hosp, discharges, deaths, changes, payerMix, admissions, census };
   };
 
   const exportBoard = async () => {
@@ -1239,11 +1252,12 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
   };
 
   const counts = useMemo(() => {
-    let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0, totalBeds=0;
+    let occ=0, avail=0, hosp=0, bh=0, vent=0, m=0, fem=0, totalBeds=0, medMix=0;
     displayRes.forEach(r => {
       if (r._left) { if (r._bedFree) { totalBeds++; avail++; } return; } // frozen record on a free bed = one available bed
       totalBeds++;
       if (holdsBed(r)) occ++;
+      if (holdsBed(r) && (r.payer === "MCA" || r.payer === "MR")) medMix++;
       if (r.status==="Available") avail++;
       if (r.status==="Hospitalization") hosp++;
       if (r.status==="Hospitalization" && r.hosp?.bedhold==="Y") bh++;
@@ -1251,7 +1265,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
       if (r.mf==="M" && IN_FACILITY.includes(r.status)) m++;
       if (r.mf==="F" && IN_FACILITY.includes(r.status)) fem++;
     });
-    return { total:totalBeds, occ, avail, hosp, bh, vent, m, fem, occPct: totalBeds ? Math.round(occ/totalBeds*100) : 0 };
+    return { total:totalBeds, occ, avail, hosp, bh, vent, m, fem, occPct: totalBeds ? Math.round(occ/totalBeds*100) : 0 , medMix };
   }, [res]);
 
   const wings = useMemo(() => {
@@ -1325,7 +1339,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         </div>
 
         <div className="grid gap-3 mb-6" style={{ gridTemplateColumns:"repeat(auto-fit,minmax(112px,1fr))" }}>
-          {[["Total beds",counts.total],["Occupied",counts.occ],["Available",counts.avail],["Occupancy",counts.occPct+"%"],["Vent",counts.vent],["In hospital",counts.hosp],["Bedhold",counts.bh]].map(([l,v])=>(
+          {[["Total beds",counts.total],["Occupied",counts.occ],["Available",counts.avail],["Occupancy",counts.occPct+"%"],["Vent",counts.vent],["In hospital",counts.hosp],["Bedhold",counts.bh],["MCA + Managed Medicare", (counts.total ? Math.round(counts.medMix / counts.total * 100) : 0) + "%"]].map(([l,v])=>(
             <div key={l} className="rounded-xl px-3 py-2" style={{ background:BRAND.card, border:`1px solid ${BRAND.line}` }}>
               <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".08em", color:BRAND.inkSoft }}>{l}</div>
               <div style={{ fontSize:22, fontFamily:BB_SERIF }}>{v}</div>
@@ -1393,7 +1407,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
                       const { st, shown } = wingRow(r);
                       return (
                         <tr key={r.id} id={"bed-"+r.id} style={{ borderTop:`1px solid ${BRAND.lineSoft}`, background:st.tint }}>
-                          <td className="px-2 py-1.5" style={{ borderLeft:`3px solid ${st.bar}` }}>{r.room}</td>
+                          <td className="px-2 py-1.5" style={{ borderLeft:`3px solid ${genderBar(r, displayRes)}` }}>{r.room}</td>
                           <td className="px-2 py-1.5" style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                             {blocksBed(r)
                               ? <button onClick={()=>setEditFor(r.id)} title={viewing?"Correct this resident's record from this date forward":"Edit resident details"} style={{ background:"none", border:"none", padding:0, color:BRAND.ink, cursor:"pointer", textAlign:"left", maxWidth:"100%", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration:"underline", textDecorationColor:BRAND.line, textUnderlineOffset:"2px" }}>{shown}</button>
@@ -1434,8 +1448,6 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             <PayerChanges res={res} facility={facility} viewDate={viewing ? viewDate : null} />
             <Section title="Pending admissions" cols={["Name","M/F","From","Payer","Target"]}
               rows={res.filter(r=>r.status==="Admitting").map(r=>[r.name||"(new)", r.mf, "", r.payer, r.room])} empty="none" />
-            <Section title="Pending discharges" cols={["Name","Room","Target","Discharged to"]}
-              rows={[]} empty="none (mark a resident when a discharge is planned)" />
             <Section title="In hospital" cols={["Name","Room","Bedhold","Date","Reason"]}
               rows={inHospital.map(r=>[r.name, r.room, r.hosp.bedhold||"", r.hosp.date||"", r.hosp.reason||""])} empty="none" />
             <Section title="Discharges" cols={["Name","Room","Date","Discharged to"]}
@@ -1552,7 +1564,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
         }} />}
       {shuffleFor && <ShuffleModal
         seedId={shuffleFor}
-        beds={res.map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, mf:r.mf, dictates:genderDictates(r), occupied:blocksBed(r) }))}
+        beds={res.filter(r=>r.status!=="Blocked").map(r=>({ id:r.id, wing:r.wing, room:r.room, name:r.name, mf:r.mf, dictates:genderDictates(r), occupied:blocksBed(r) }))}
         onCancel={()=>setShuffleFor(null)}
         onApply={applyShuffle} />}
       {pendingImport && (
@@ -1911,8 +1923,6 @@ async function buildBedboardWorkbook(facilityName, iso, rows, counts, boxes) {
     boxRows(["Name","Change","Effective","Logged"], (boxes.changes||[]).map(x=>[x.name, `${x.kind==="vent"?"Vent ":x.kind==="status"?"Status ":""}${x.from||"—"} → ${x.to||"—"}`, x.date, x.loggedDate, x.hl]), 4);
     boxHeader("Admissions");
     boxRows(["Name","M/F","Payer","Room"], (boxes.admissions||[]).map(x=>[x.name,x.mf,x.payer,x.room]));
-    boxHeader("Pending discharges");
-    boxRows(["Name","Room","Target","To"], (boxes.pending||[]));
     boxHeader("Census");
     boxRows(["","Count","",""], (boxes.census||[]).map(([k,v])=>[k, v, "", ""]));
     boxHeader("Payer mix");
@@ -3632,7 +3642,7 @@ export default function App() {
       return t && u ? { token: t, user: u } : null;
     } catch { return null; }
   });
-  if (resetToken) return <ResetPassword token={resetToken} />;
+  if (resetToken) return <ErrorBoundary><ResetPassword token={resetToken} /></ErrorBoundary>;
   if (!auth) return <Login onLogin={(token, user, remember) => {
     const store = remember ? localStorage : sessionStorage;
     const other = remember ? sessionStorage : localStorage;
@@ -4429,6 +4439,7 @@ function Login({ onLogin }) {
 /* ============================ Reset password ============================ */
 function ResetPassword({ token }) {
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
