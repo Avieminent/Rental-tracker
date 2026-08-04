@@ -23,13 +23,13 @@ import bcrypt from "bcryptjs";
 import pg from "pg";
 import crypto from "node:crypto";
 import "dotenv/config";
- 
+
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET || "change-me";
 const PORT = process.env.PORT || 4000;
 const APP_URL = process.env.APP_URL || "http://localhost:5173";
- 
+
 const MAIL = {
   tenant: process.env.GRAPH_TENANT_ID,
   clientId: process.env.GRAPH_CLIENT_ID,
@@ -38,7 +38,7 @@ const MAIL = {
   fromName: process.env.MAIL_FROM_NAME || "Eminent Central",
 };
 const mailConfigured = !!(MAIL.tenant && MAIL.clientId && MAIL.clientSecret && MAIL.from);
- 
+
 const app = express();
 app.set("trust proxy", 1);
 // Only these web addresses may talk to the API. Add more via CORS_ORIGIN
@@ -54,14 +54,14 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "2mb" }));
- 
+
 /* ---------- helpers ---------- */
 function httpError(status, msg) { const e = new Error(msg); e.status = status; return e; }
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   if (!e.status) console.error(e);
   res.status(e.status || 500).json({ error: e.status ? e.message : "Server error." });
 });
- 
+
 // ---- Rate limiting (in-memory, per client IP) ----
 function makeLimiter(max, windowMs, message) {
   const hits = new Map();
@@ -80,7 +80,7 @@ function makeLimiter(max, windowMs, message) {
 }
 const rateLimitLogin = makeLimiter(10, 15 * 60 * 1000, "Too many sign-in attempts.");
 const rateLimitReset = makeLimiter(5, 15 * 60 * 1000, "Too many password-reset requests.");
- 
+
 // ---- Email via Microsoft 365 (Graph, client-credentials) ----
 async function sendMail(to, subject, html, attachments) {
   if (!mailConfigured) { console.warn("Email not configured; skipping send to", to); return false; }
@@ -119,7 +119,7 @@ async function sendMail(to, subject, html, attachments) {
   if (!sendRes.ok) throw new Error("Graph sendMail failed: " + (await sendRes.text()));
   return true;
 }
- 
+
 // ---- Audit trail (append-only; must never break a request) ----
 async function writeAudit({ userId = null, email = null, role = null, action, facilityId = null, recordId = null, module = null, detail = null }) {
   try {
@@ -132,7 +132,7 @@ async function writeAudit({ userId = null, email = null, role = null, action, fa
 }
 const auditReq = (req, action, opts = {}) =>
   writeAudit({ userId: req.user?.id, email: req.user?.email, role: req.user?.role, action, ...opts });
- 
+
 // ---- Auth ----
 function authenticate(req, res, next) {
   const h = req.headers.authorization || "";
@@ -155,7 +155,7 @@ function requireAdmin(req, res, next) {
   if (req.user?.role !== "admin") return res.status(403).json({ error: "Admins only." });
   next();
 }
- 
+
 /* ---------- auth routes ---------- */
 app.post("/api/login", rateLimitLogin, wrap(async (req, res) => {
   const { email, password, remember } = req.body || {};
@@ -175,9 +175,9 @@ app.post("/api/login", rateLimitLogin, wrap(async (req, res) => {
   const token = jwt.sign({ sub: u.id, role: u.role, facilityId: u.facility_id, email: u.email }, JWT_SECRET, { expiresIn });
   res.json({ token, user: { id: u.id, email: u.email, role: u.role, facilityId: u.facility_id, pages: u.pages || null } });
 }));
- 
+
 app.get("/api/me", authenticate, (req, res) => res.json({ user: req.user }));
- 
+
 /* ---------- invites (invite-only user creation) ---------- */
 async function sendInvite(u) {
   const token = crypto.randomBytes(32).toString("hex");
@@ -194,7 +194,7 @@ async function sendInvite(u) {
   );
   await writeAudit({ userId: u.id, email: u.email, action: "user.invite_sent" });
 }
- 
+
 /* ---------- forgot / reset password ---------- */
 app.post("/api/forgot", rateLimitReset, async (req, res) => {
   const { email } = req.body || {};
@@ -221,7 +221,7 @@ app.post("/api/forgot", rateLimitReset, async (req, res) => {
   } catch (e) { console.error("forgot:", e.message); }
   res.json({ ok: true }); // identical response regardless of outcome
 });
- 
+
 app.post("/api/reset", rateLimitReset, wrap(async (req, res) => {
   const { token, password } = req.body || {};
   if (!password || String(password).length < 8) throw httpError(400, "Password must be at least 8 characters.");
@@ -237,7 +237,7 @@ app.post("/api/reset", rateLimitReset, wrap(async (req, res) => {
   await writeAudit({ userId: pr.user_id, email: u[0]?.email, action: "password.reset" });
   res.json({ ok: true });
 }));
- 
+
 /* ---------- bootstrap: everything the user may see ---------- */
 app.get("/api/bootstrap", authenticate, wrap(async (req, res) => {
   const facQuery = seesAll(req.user)
@@ -258,7 +258,7 @@ app.get("/api/bootstrap", authenticate, wrap(async (req, res) => {
     records,    // [{ id, facility_id, module, collection, data }]
   });
 }));
- 
+
 /* ---------- generic records (every module) ---------- */
 // ---- Census "update done" email: per-facility recipient list + send with the bedboard attached ----
 const RECIP_MODULE = "census", RECIP_COLLECTION = "email-recipients";
@@ -269,12 +269,12 @@ async function getRecipients(facilityId) {
   );
   return rows[0] ? { id: rows[0].id, emails: Array.isArray(rows[0].data?.emails) ? rows[0].data.emails : [] } : { id: null, emails: [] };
 }
- 
+
 app.get("/api/census-recipients/:facilityId", authenticate, wrap(async (req, res) => {
   if (req.user.role !== "admin") throw httpError(403, "Administrators only.");
   res.json({ emails: (await getRecipients(req.params.facilityId)).emails });
 }));
- 
+
 app.put("/api/census-recipients/:facilityId", authenticate, wrap(async (req, res) => {
   if (req.user.role !== "admin") throw httpError(403, "Administrators only.");
   const emails = (Array.isArray(req.body?.emails) ? req.body.emails : [])
@@ -286,7 +286,7 @@ app.put("/api/census-recipients/:facilityId", authenticate, wrap(async (req, res
   res.json({ ok: true, emails });
   auditReq(req, "update", { facilityId: req.params.facilityId, module: RECIP_MODULE, detail: "email recipients" });
 }));
- 
+
 app.post("/api/census-done", authenticate, wrap(async (req, res) => {
   const { facilityId, facilityName, dateISO, summary, xlsxBase64 } = req.body || {};
   if (!facilityId || !dateISO) throw httpError(400, "facilityId and dateISO are required.");
@@ -314,7 +314,7 @@ app.post("/api/census-done", authenticate, wrap(async (req, res) => {
   res.json({ ok: true, sent, of: emails.length });
   auditReq(req, "update", { facilityId, module: "census", detail: `update-done email to ${sent}/${emails.length}` });
 }));
- 
+
 app.post("/api/records", authenticate, wrap(async (req, res) => {
   const { module, collection, facilityId, data } = req.body || {};
   if (!module || !collection || !facilityId) throw httpError(400, "module, collection and facilityId are required.");
@@ -326,14 +326,14 @@ app.post("/api/records", authenticate, wrap(async (req, res) => {
   res.status(201).json({ id: rows[0].id });
   auditReq(req, "create", { facilityId, recordId: rows[0].id, module, detail: collection });
 }));
- 
+
 app.get("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows } = await pool.query("select id, facility_id, module, collection, data from record where id = $1", [req.params.id]);
   if (!rows[0]) throw httpError(404, "Record not found.");
   assertFacility(req.user, rows[0].facility_id);
   res.json({ id: String(rows[0].id), facilityId: rows[0].facility_id, module: rows[0].module, collection: rows[0].collection, data: rows[0].data });
 }));
- 
+
 app.patch("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select facility_id, module, collection from record where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Record not found.");
@@ -342,7 +342,7 @@ app.patch("/api/records/:id", authenticate, wrap(async (req, res) => {
   res.json({ ok: true });
   auditReq(req, "update", { facilityId: found[0].facility_id, recordId: req.params.id, module: found[0].module, detail: found[0].collection });
 }));
- 
+
 app.delete("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select facility_id, module, collection from record where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Record not found.");
@@ -351,7 +351,7 @@ app.delete("/api/records/:id", authenticate, wrap(async (req, res) => {
   res.status(204).end();
   auditReq(req, "delete", { facilityId: found[0].facility_id, recordId: req.params.id, module: found[0].module, detail: found[0].collection });
 }));
- 
+
 /* ---------- facility metadata ---------- */
 app.patch("/api/facilities/:fid", authenticate, wrap(async (req, res) => {
   assertFacility(req.user, req.params.fid);
@@ -368,13 +368,13 @@ app.patch("/api/facilities/:fid", authenticate, wrap(async (req, res) => {
   res.json({ name: rows[0].name, tagline: rows[0].tagline, location: rows[0].location || "" });
   auditReq(req, "facility.update", { facilityId: req.params.fid, detail: rows[0].name });
 }));
- 
+
 /* ---------- login management (admin only) ---------- */
 const ROLES = ["admin", "corporate", "facility"];
 const PAGE_KEYS = ["roster", "census", "rehosp", "rfms", "staffing", "budget", "rentals", "rfms:sign"]; // rfms:sign = permission to sign RFMS spend-downs
 const cleanPages = (v) => Array.isArray(v) ? v.filter((k) => PAGE_KEYS.includes(k)) : null;
 const toUser = (r) => ({ id: r.id, email: r.email, role: r.role, facilityId: r.facility_id, facilityName: r.facility_name || null, pages: r.pages || null, invited: r.invited === true });
- 
+
 function roleScope(role, facilityId) {
   if (!ROLES.includes(role)) throw httpError(400, "Unknown role.");
   if (role === "facility") {
@@ -383,7 +383,7 @@ function roleScope(role, facilityId) {
   }
   return null;
 }
- 
+
 app.get("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   const { rows } = await pool.query(
     `select u.id, u.email, u.role, u.facility_id, f.name as facility_name, (u.password_hash = 'invited') as invited
@@ -392,7 +392,7 @@ app.get("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   );
   res.json(rows.map(toUser));
 }));
- 
+
 app.post("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   const { email, role, facilityId, pages } = req.body || {};
   if (!email || !String(email).trim()) throw httpError(400, "Email is required.");
@@ -415,7 +415,7 @@ app.post("/api/users", authenticate, requireAdmin, wrap(async (req, res) => {
   res.status(201).json({ ...toUser({ ...rows[0], facility_name: f[0]?.name }), invited: true, emailFailed });
   auditReq(req, "user.create", { facilityId: fid, detail: `${rows[0].email} (${rows[0].role}) — invite ${emailFailed ? "FAILED to send" : "emailed"}` });
 }));
- 
+
 // Resend the sign-in link: a fresh invite for pending users, a standard reset for active ones.
 app.post("/api/users/:id/invite", authenticate, requireAdmin, wrap(async (req, res) => {
   const { rows } = await pool.query("select * from app_user where id = $1", [req.params.id]);
@@ -435,10 +435,10 @@ app.post("/api/users/:id/invite", authenticate, requireAdmin, wrap(async (req, r
   }
   res.json({ ok: true, invited: u.password_hash === "invited" });
 }));
- 
+
 // (removed: manual admin password setting — invite-only; use POST /api/users/:id/invite)
- 
- 
+
+
 app.delete("/api/users/:id", authenticate, requireAdmin, wrap(async (req, res) => {
   if (req.params.id === req.user.id) throw httpError(400, "You can't delete your own login.");
   const { rows } = await pool.query("select role, email from app_user where id = $1", [req.params.id]);
@@ -451,7 +451,7 @@ app.delete("/api/users/:id", authenticate, requireAdmin, wrap(async (req, res) =
   res.status(204).end();
   auditReq(req, "user.delete", { detail: rows[0].email });
 }));
- 
+
 app.patch("/api/users/:id/pages", authenticate, requireAdmin, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select role from app_user where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Login not found.");
@@ -461,7 +461,7 @@ app.patch("/api/users/:id/pages", authenticate, requireAdmin, wrap(async (req, r
   res.json({ ok: true, pages: pageList });
   auditReq(req, "user.pages", { detail: `${req.params.id}: ${pageList ? pageList.join(",") : "all"}` });
 }));
- 
+
 /* ---------- audit log (admin only, read-only) ---------- */
 app.get("/api/audit", authenticate, requireAdmin, wrap(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 2000);
@@ -487,8 +487,7 @@ app.get("/api/audit", authenticate, requireAdmin, wrap(async (req, res) => {
     facilityId: r.facility_id || null, facilityName: r.facility_name || null,
   })));
 }));
- 
+
 app.get("/api/health", (req, res) => res.json({ ok: true }));
- 
+
 app.listen(PORT, () => console.log(`Eminent Central API (v2) on :${PORT}`));
- 
