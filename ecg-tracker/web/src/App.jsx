@@ -3749,7 +3749,7 @@ function Shell({ auth, onLogout }) {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
         {view === "dashboard" && canSeeAll
           ? <Dashboard data={data} onOpen={(fId, mod) => { setView(fId); setModule(mod); }} />
-          : facility ? <Facility facility={facility} module={module} setModule={setModule} data={data} update={update} role={role} allowedPages={allowedPages} /> : null}
+          : facility ? <Facility facility={facility} module={module} setModule={setModule} data={data} update={update} role={role} allowedPages={allowedPages} auth={auth} /> : null}
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 py-5 mt-4" style={{ borderTop: `1px solid ${BRAND.line}` }}>
@@ -3873,7 +3873,7 @@ function ModuleCard({ icon: Icon, title, stats, onOpen }) {
 }
 
 /* ============================ Facility frame ============================ */
-function Facility({ facility, module, setModule, data, update, role, allowedPages }) {
+function Facility({ facility, module, setModule, data, update, role, allowedPages, auth }) {
   const modules = allowedPages ? MODULES.filter((m) => allowedPages.includes(m.key)) : MODULES;
   useEffect(() => {
     if (modules.length && !modules.some((m) => m.key === module)) setModule(modules[0].key);
@@ -4440,6 +4440,7 @@ function Login({ onLogin }) {
 function ResetPassword({ token }) {
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
+  const [showPw, setShowPw] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4463,9 +4464,12 @@ function ResetPassword({ token }) {
           </>) : (<>
             <div className="text-sm mb-3" style={{ fontFamily: SERIF }}>Choose a new password</div>
             <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>New password</span>
-              <input style={inpStyle} type="password" value={password} autoFocus onChange={(e) => setPassword(e.target.value)} /></label>
+              <input style={inpStyle} type={showPw ? "text" : "password"} value={password} autoFocus onChange={(e) => setPassword(e.target.value)} /></label>
+            <button type="button" onClick={() => setShowPw(v => !v)} className="text-xs mb-2" style={{ color: BRAND.inkSoft, background: "none", border: "none", cursor: "pointer", padding: 0, textDecoration: "underline" }}>
+              {showPw ? "Hide passwords" : "Show passwords"}
+            </button>
             <label className="block mb-4"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Confirm password</span>
-              <input style={inpStyle} type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+              <input style={inpStyle} type={showPw ? "text" : "password"} value={confirm} onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
             <label className="flex items-center gap-2 mb-4 text-sm" style={{ color: BRAND.inkSoft, cursor: "pointer" }}>
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
               <span>Remember this device for 30 days</span>
