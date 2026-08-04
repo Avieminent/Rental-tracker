@@ -4491,6 +4491,7 @@ function UserManager({ facilities, meId, onClose }) {
   const [form, setForm] = useState({ email: "", role: "facility", facilityId: facilities[0]?.id || "", pages: MODULES.map((m) => m.key) });
   const [pagesId, setPagesId] = useState(null);
   const [pagesSel, setPagesSel] = useState([]);
+  const [sendState, setSendState] = useState({}); // userId -> "sending" | "sent" | error text
   const togglePage = (arr, k) => arr.includes(k) ? arr.filter((x) => x !== k) : [...arr, k];
   const savePages = async (id) => {
     setBusy(true); setErr("");
@@ -4564,11 +4565,22 @@ function UserManager({ facilities, meId, onClose }) {
               <div className="min-w-0"><div className="text-sm truncate">{u.email}{u.id === meId && <span className="text-[11px] ml-2" style={{ color: BRAND.inkSoft }}>(you)</span>}</div>
                 <div className="text-[11px] uppercase tracking-wider mt-0.5" style={{ color: BRAND.inkSoft }}>{ROLE_LABEL[u.role]}{u.role === "facility" && u.facilityName ? ` · ${u.facilityName}` : ""}</div></div>
               {u.invited && <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background:"#fdf4dd", color:"#8a6d1f", border:"1px solid #d9c489" }}>Invite pending</span>}
-              <button onClick={async () => { setErr(""); try { await api(`/api/users/${u.id}/invite`, "POST", {}); setCreated({ email: u.email, emailFailed: false, resend: true }); } catch (e) { setErr(e.message); } }}
-                className="px-3 py-1.5 rounded-lg text-xs shrink-0" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.ink }}
+              <button disabled={sendState[u.id] === "sending"}
+                onClick={async () => {
+                  setSendState((m) => ({ ...m, [u.id]: "sending" }));
+                  try { await api(`/api/users/${u.id}/invite`, "POST", {}); setSendState((m) => ({ ...m, [u.id]: "sent" })); setTimeout(() => setSendState((m) => ({ ...m, [u.id]: undefined })), 4000); }
+                  catch (e) { setSendState((m) => ({ ...m, [u.id]: "err:" + (e.message || "failed") })); }
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs shrink-0"
+                style={{ border: `1px solid ${sendState[u.id] === "sent" ? "#3f7d4e" : BRAND.line}`, color: sendState[u.id] === "sent" ? "#3f7d4e" : BRAND.ink, opacity: sendState[u.id] === "sending" ? 0.6 : 1 }}
                 title={u.invited ? "Resend the invite email (new 7-day link)" : "Email them a password reset link (1 hour)"}>
-                Email sign-in link
+                {sendState[u.id] === "sending" ? "Sending…" : sendState[u.id] === "sent" ? "Sent ✓" : "Email sign-in link"}
               </button>
+              {String(sendState[u.id] || "").startsWith("err:") && <span className="text-[11px] shrink-0" style={{ color: "#c0392b" }}>{String(sendState[u.id]).slice(4)}</span>}
+              {u.role !== "admin" && <button onClick={() => { if (pagesId === u.id) { setPagesId(null); } else { setPagesId(u.id); setPagesSel(u.pages || []); } }}
+                className="px-3 py-1.5 rounded-lg text-xs shrink-0" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.ink }}>Permissions</button>}
+              {u.id !== meId && <button disabled={busy} onClick={() => { if (window.confirm(`Delete the login for ${u.email}? They will no longer be able to sign in.`)) remove(u.id); }}
+                className="px-2.5 py-1.5 rounded-lg text-xs shrink-0" title="Delete login" style={{ border: "1px solid #eec4c0", color: "#c0392b" }}><Trash2 size={13} /></button>}
               {pagesId === u.id && (
                 <div className="w-full basis-full mt-2 rounded-lg px-3 py-3" style={{ background: BRAND.paper, border: `1px solid ${BRAND.line}` }}>
                   <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: BRAND.inkSoft }}>Permissions for {u.email}</div>
