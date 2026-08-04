@@ -3726,7 +3726,7 @@ function Shell({ auth, onLogout }) {
           </div>
         </div>
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <nav className="flex items-center gap-0.5 overflow-x-auto -mb-px">
+          <nav className="flex items-center justify-center gap-0.5 overflow-x-auto -mb-px" style={{ justifyContent: "safe center" }}>
             {canSeeAll && <ShellTab active={view === "dashboard"} onClick={() => setView("dashboard")} icon={LayoutDashboard}>Dashboard</ShellTab>}
             {FACILITIES.map((f) => (
               <ShellTab key={f.id} active={view === f.id} onClick={() => setView(f.id)}>{f.name}</ShellTab>
@@ -4429,7 +4429,6 @@ function Login({ onLogin }) {
             <button onClick={() => { setMode("forgot"); setErr(""); }} className="block mx-auto text-xs mt-3 underline" style={{ color: BRAND.inkSoft }}>Forgot password?</button>
           </div>
         </div>
-        <p className="text-center text-xs mt-4" style={{ color: BRAND.inkSoft }}>Corporate sees every facility. Each facility sees only its own.</p>
       </div>
     </div>
   );
