@@ -17,8 +17,7 @@ if (SENTRY_DSN) {
 }
 
 import {
-  Plus, Pencil, Trash2, X, Search, ChevronRight, Save, Upload, LayoutDashboard, Package, CheckCircle2, AlertTriangle, User, Users, Activity, Building2, Briefcase, Wallet, History, KeyRound, Landmark
-} from "lucide-react";
+  Plus, Pencil, Trash2, X, Search, ChevronRight, Save, Upload, LayoutDashboard, Package, CheckCircle2, AlertTriangle, User, Users, Activity, Building2, Briefcase, Wallet, History, KeyRound, Landmark, Eye, EyeOff } from "lucide-react";
 
 /* ============================ Brand ============================ */
 const BRAND = {
@@ -4440,7 +4439,8 @@ function Login({ onLogin }) {
 function ResetPassword({ token }) {
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
-  const [showPw, setShowPw] = useState(false);
+  const [show1, setShow1] = useState(false);
+  const [show2, setShow2] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4464,12 +4464,19 @@ function ResetPassword({ token }) {
           </>) : (<>
             <div className="text-sm mb-3" style={{ fontFamily: SERIF }}>Choose a new password</div>
             <label className="block mb-3"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>New password</span>
-              <input style={inpStyle} type={showPw ? "text" : "password"} value={password} autoFocus onChange={(e) => setPassword(e.target.value)} /></label>
-            <button type="button" onClick={() => setShowPw(v => !v)} className="text-xs mb-2" style={{ color: BRAND.inkSoft, background: "none", border: "none", cursor: "pointer", padding: 0, textDecoration: "underline" }}>
-              {showPw ? "Hide passwords" : "Show passwords"}
-            </button>
+              <div style={{ position: "relative" }}><input style={{ ...inpStyle, paddingRight: 38 }} type={show1 ? "text" : "password"} value={password} autoFocus onChange={(e) => setPassword(e.target.value)} />
+              <button type="button" tabIndex={-1} onClick={() => setShow1(v => !v)} title={show1 ? "Hide password" : "Show password"}
+                style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: BRAND.inkSoft, padding: 0, lineHeight: 0 }}>
+                {show1 ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div></label>
             <label className="block mb-4"><span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Confirm password</span>
-              <input style={inpStyle} type={showPw ? "text" : "password"} value={confirm} onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+              <div style={{ position: "relative" }}><input style={{ ...inpStyle, paddingRight: 38 }} type={show2 ? "text" : "password"} value={confirm} onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+              <button type="button" tabIndex={-1} onClick={() => setShow2(v => !v)} title={show2 ? "Hide password" : "Show password"}
+                style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: BRAND.inkSoft, padding: 0, lineHeight: 0 }}>
+                {show2 ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div></label>
             <label className="flex items-center gap-2 mb-4 text-sm" style={{ color: BRAND.inkSoft, cursor: "pointer" }}>
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
               <span>Remember this device for 30 days</span>
