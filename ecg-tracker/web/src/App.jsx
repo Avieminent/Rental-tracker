@@ -4561,7 +4561,7 @@ function UserManager({ facilities, meId, onClose }) {
       </div>
       <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${BRAND.line}` }}>
         {users === null ? <div className="px-4 py-5 text-sm" style={{ color: BRAND.inkSoft }}>Loading…</div>
-          : users.map((u) => (
+          : users.map((u, ui) => (
             <div key={u.id} className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
               <div className="min-w-0"><div className="text-sm truncate">{u.email}{u.id === meId && <span className="text-[11px] ml-2" style={{ color: BRAND.inkSoft }}>(you)</span>}</div>
                 <div className="text-[11px] uppercase tracking-wider mt-0.5" style={{ color: BRAND.inkSoft }}>{ROLE_LABEL[u.role]}{u.role === "facility" && u.facilityName ? ` · ${u.facilityName}` : ""}</div></div>
@@ -4571,7 +4571,7 @@ function UserManager({ facilities, meId, onClose }) {
               <div className="relative shrink-0">
                 <button onClick={() => setMenuId(menuId === u.id ? null : u.id)} className="px-2.5 py-1 rounded-lg text-sm" style={{ border: `1px solid ${BRAND.line}`, color: BRAND.inkSoft, lineHeight: 1 }}>⋯</button>
                 {menuId === u.id && (
-                  <div className="absolute right-0 mt-1 rounded-lg overflow-hidden" style={{ zIndex: 30, background: "#fff", border: `1px solid ${BRAND.line}`, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", minWidth: 190 }}>
+                  <div className="absolute right-0 rounded-lg overflow-hidden" style={{ zIndex: 30, background: "#fff", border: `1px solid ${BRAND.line}`, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", minWidth: 190, ...(ui >= Math.ceil(users.length / 2) ? { bottom: "100%", marginBottom: 4 } : { top: "100%", marginTop: 4 }) }}>
                     <button disabled={sendState[u.id] === "sending"} className="block w-full text-left px-3 py-2 text-xs" style={{ color: BRAND.ink }}
                       onClick={async () => {
                         setMenuId(null); setSendState((m) => ({ ...m, [u.id]: "sending" }));
@@ -4615,7 +4615,6 @@ function UserManager({ facilities, meId, onClose }) {
             </div>
           ))}
       </div>
-      )}
     </Modal>
   );
 }
