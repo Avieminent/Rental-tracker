@@ -146,12 +146,7 @@ const diffDays = (a, b) => { if (!a || !b) return null; const d = (new Date(b) -
 const yesNoTone = (v) => (v === "Yes" ? TONE.bad : v === "No" ? TONE.ok : TONE.idle);
 
 const AGENCY_POSITIONS = {
-  Nursing: ["RN", "LPN", "CNA"],
-  Therapy: ["PT", "PTA", "OT", "COTA", "SLP"],
-  Dietary: ["Cook", "Dietary Aide"],
-  Housekeeping: ["Housekeeper", "Laundry Aide"],
-  Maintenance: ["Maintenance Tech"],
-  Other: [],
+  Nursing: ["RN", "LPN", "CNA"], // dropdown only for Nursing — all other departments type the position manually
 };
 const TRACKERS = {
   staffing: {
@@ -185,8 +180,8 @@ const TRACKERS = {
       ] },
       { id: "agency", label: "Agency Usage", cols: [
         { k: "date", label: "Date", type: "date" },
-        { k: "dept", label: "Department", type: "select", options: opt("Department", ["Nursing", "Therapy", "Dietary", "Housekeeping", "Maintenance", "Other"]), soft: true },
-        { k: "title", label: "Position", type: "select", optionsFor: (row) => (AGENCY_POSITIONS[row.dept] || []), allowOther: true },
+        { k: "dept", label: "Department", type: "select", options: opt("Department", ["Nursing", "Therapy", "Other"]), soft: true },
+        { k: "title", label: "Position", type: "select", optionsFor: (row) => (row.dept === "Nursing" ? AGENCY_POSITIONS.Nursing : null), allowOther: true },
         { k: "shift", label: "Shift", type: "select", options: ["Day", "Evening", "Night"] },
         { k: "hours", label: "Hours", type: "num" },
         { k: "notes", label: "Notes", type: "long", hideCol: true },
@@ -380,6 +375,7 @@ function TrackerForm({ tab, label, row, onClose, onSave }) {
             <Field label={c.label}>
               {c.type === "select" ? (() => {
                 const opts = c.optionsFor ? c.optionsFor(f) : c.options;
+                if (opts == null) return <In type="text" v={f[c.k]} on={(v) => set(c.k, v)} />;
                 if (!c.allowOther) return <Sel v={f[c.k]} on={(v) => set(c.k, v)} options={["", ...opts]} />;
                 const OTHER = "Other…";
                 const isOther = f[c.k] === OTHER || (f[c.k] && !opts.includes(f[c.k]));
