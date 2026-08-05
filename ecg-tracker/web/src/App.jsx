@@ -145,6 +145,14 @@ const opt = (k, fb) => (OPTS[k] && OPTS[k].length ? OPTS[k] : fb);
 const diffDays = (a, b) => { if (!a || !b) return null; const d = (new Date(b) - new Date(a)) / 86400000; return isNaN(d) ? null : Math.round(d); };
 const yesNoTone = (v) => (v === "Yes" ? TONE.bad : v === "No" ? TONE.ok : TONE.idle);
 
+const AGENCY_POSITIONS = {
+  Nursing: ["RN", "LPN", "CNA"],
+  Therapy: ["PT", "PTA", "OT", "COTA", "SLP"],
+  Dietary: ["Cook", "Dietary Aide"],
+  Housekeeping: ["Housekeeper", "Laundry Aide"],
+  Maintenance: ["Maintenance Tech"],
+  Other: [],
+};
 const TRACKERS = {
   staffing: {
     label: "Staffing & HR", icon: Briefcase,
@@ -178,7 +186,7 @@ const TRACKERS = {
       { id: "agency", label: "Agency Usage", cols: [
         { k: "date", label: "Date", type: "date" },
         { k: "dept", label: "Department", type: "select", options: opt("Department", ["Nursing", "Therapy", "Dietary", "Housekeeping", "Maintenance", "Other"]), soft: true },
-        { k: "title", label: "Position" },
+        { k: "title", label: "Position", type: "select", optionsFor: (row) => (AGENCY_POSITIONS[row.dept] || []), allowOther: true },
         { k: "shift", label: "Shift", type: "select", options: ["Day", "Evening", "Night"] },
         { k: "hours", label: "Hours", type: "num" },
         { k: "notes", label: "Notes", type: "long", hideCol: true },
@@ -370,7 +378,16 @@ function TrackerForm({ tab, label, row, onClose, onSave }) {
         {editable.map((c) => (
           <div key={c.k} className={c.type === "long" ? "sm:col-span-2" : ""}>
             <Field label={c.label}>
-              {c.type === "select" ? <Sel v={f[c.k]} on={(v) => set(c.k, v)} options={["", ...c.options]} />
+              {c.type === "select" ? (() => {
+                const opts = c.optionsFor ? c.optionsFor(f) : c.options;
+                if (!c.allowOther) return <Sel v={f[c.k]} on={(v) => set(c.k, v)} options={["", ...opts]} />;
+                const OTHER = "Other…";
+                const isOther = f[c.k] === OTHER || (f[c.k] && !opts.includes(f[c.k]));
+                return <div className="flex gap-2">
+                  <Sel v={isOther ? OTHER : f[c.k]} on={(v) => set(c.k, v === OTHER ? OTHER : v)} options={["", ...opts, OTHER]} />
+                  {isOther && <In type="text" v={f[c.k] === OTHER ? "" : f[c.k]} on={(v) => set(c.k, v || OTHER)} autoFocus />}
+                </div>;
+              })()
                 : c.type === "long" ? <textarea rows={2} style={inpStyle} value={f[c.k]} onChange={(e) => set(c.k, e.target.value)} />
                 : <In type={c.type === "date" ? "date" : "text"} v={f[c.k]} on={(v) => set(c.k, v)} autoFocus={c === first} />}
             </Field>
