@@ -3640,9 +3640,9 @@ const RosterCols = ({ admin }) => (
     <col style={{ width: "17%" }} /><col style={{ width: "20%" }} /><col style={{ width: "24%" }} /><col style={{ width: "18%" }} /><col style={{ width: admin ? "17%" : "21%" }} />{admin && <col style={{ width: "44px" }} />}
   </colgroup>
 );
-function RosterPersonRow({ p, cols, onEdit }) {
+function RosterPersonRow({ p, cols, onEdit, rowId, flash }) {
   return (
-    <tr style={{ borderTop: `1px solid ${BRAND.lineSoft}` }}>
+    <tr id={rowId} style={{ borderTop: `1px solid ${BRAND.lineSoft}`, background: flash ? "#f5e9c8" : undefined, transition: "background 0.6s" }}>
       {cols.map((c) => (
         <td key={c.k} className="px-3 py-2 align-top" style={{ fontSize: 13, color: c.k === "notes" ? BRAND.inkSoft : undefined, overflowWrap: "anywhere" }}>
           <RosterVal v={p[c.k]} kind={c.kind} />
@@ -3840,6 +3840,7 @@ function RosterAddModal({ doc, kind, fac, partnerOrg, onCancel, onDone }) {
 function RosterV2({ facility, isAdmin }) {
   const { doc, save, loading } = useRosterDoc();
   const [q, setQ] = useState("");
+  const [flashId, setFlashId] = useState(null);
   const [, force] = useState(0);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(null); // {kind, partnerOrg?}
@@ -3848,14 +3849,27 @@ function RosterV2({ facility, isAdmin }) {
   if (!doc) return <RosterImportGate isAdmin={isAdmin} />;
   const fac = doc.facilities.find((f) => f.name === facility.name);
   const needle = q.trim().toLowerCase();
-  const hit = (p) => !needle || ["role","name","title","email","phone","notes"].some((k) => String(p[k] || "").toLowerCase().includes(needle));
-  const myRegionals = doc.regionals.filter((r) => r.facilities.includes(facility.name) && hit(r));
+  const matchQ = (p) => needle && ["role","name","title","email","phone","notes"].some((k) => String(p[k] || "").toLowerCase().includes(needle));
+  const hit = () => true; // search navigates; it no longer hides rows
+  const myRegionals = doc.regionals.filter((r) => r.facilities.includes(facility.name));
   const myPartners = doc.partners.filter((p) => /portfolio|all facilities/i.test(p.serves) || String(p.serves).toLowerCase().includes(facility.name.toLowerCase()));
   const PKEYS = ["ADDRESS","PHONE","WEB","BILLING"];
   const RKEYS = ["LEGAL ENTITY","EIN","NPI","MEDICARE CCN","MEDICAID PROVIDER ID","STATE LICENSE #","BED COUNT","CMS STAR RATING","CHOW / OWNERSHIP DATE"];
   const teamCols = [{k:"role"},{k:"name"},{k:"email",kind:"email"},{k:"phone",kind:"phone"},{k:"notes"}];
   const corpCols = [{k:"name"},{k:"title"},{k:"email",kind:"email"},{k:"phone",kind:"phone"},{k:"notes"}];
   if (!fac) return <div className="text-sm" style={{ color: BRAND.inkSoft }}>No roster data for this facility.</div>;
+  const matches = [];
+  if (needle) {
+    fac.team.forEach((p, i) => matchQ(p) && matches.push({ id: "rv2-team-" + i, name: p.name || p.role, sub: p.role, tag: "Facility team" }));
+    myRegionals.forEach((p, i) => matchQ(p) && matches.push({ id: "rv2-reg-" + i, name: p.name, sub: p.title, tag: "Regionals" }));
+    doc.corporate.forEach((g, gi) => g.people.forEach((p, i) => matchQ(p) && matches.push({ id: "rv2-corp-" + gi + "-" + i, name: p.name, sub: p.title, tag: g.group })));
+    doc.partners.forEach((pt) => pt.people.forEach((p, i) => matchQ(p) && matches.push({ id: "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i, name: p.name, sub: p.title, tag: pt.org })));
+  }
+  const jump = (id) => {
+    setQ("");
+    const el = document.getElementById(id);
+    if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); setFlashId(id); setTimeout(() => setFlashId(null), 1800); }
+  };
   return (
     <div>
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
@@ -3864,8 +3878,21 @@ function RosterV2({ facility, isAdmin }) {
           <div style={{ color: BRAND.inkSoft, fontSize: 13 }}>{fac.fullName}</div>
         </div>
         <div style={{ position: "relative" }}>
-          <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: BRAND.inkSoft }} />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people, roles…" className="rounded-lg py-2 pr-3" style={{ border: `1px solid ${BRAND.line}`, paddingLeft: 32, fontSize: 13, width: 240 }} />
+          <Search size={14} style={{ position: "absolute", left: 10, top: 17, color: BRAND.inkSoft }} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people, roles…" className="rounded-lg py-2 pr-3" style={{ border: `1px solid ${BRAND.line}`, paddingLeft: 32, fontSize: 13, width: 260 }} />
+          {needle && (
+            <div className="absolute rounded-lg overflow-hidden" style={{ top: "100%", right: 0, marginTop: 4, zIndex: 40, background: "#fff", border: `1px solid ${BRAND.line}`, boxShadow: "0 10px 28px rgba(0,0,0,0.15)", width: 340, maxHeight: 300, overflowY: "auto" }}>
+              {matches.length === 0 && <div className="px-3 py-2 text-xs" style={{ color: BRAND.inkSoft }}>No matches</div>}
+              {matches.slice(0, 12).map((m) => (
+                <button key={m.id} onClick={() => jump(m.id)} className="block w-full text-left px-3 py-2" style={{ borderBottom: `1px solid ${BRAND.lineSoft}` }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{m.name}</span>
+                  {m.sub && <span style={{ fontSize: 12, color: BRAND.inkSoft }}> — {m.sub}</span>}
+                  <span className="float-right text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: BRAND.paper, color: BRAND.inkSoft, border: `1px solid ${BRAND.lineSoft}` }}>{m.tag}</span>
+                </button>
+              ))}
+              {matches.length > 12 && <div className="px-3 py-1.5 text-[11px]" style={{ color: BRAND.inkSoft }}>+ {matches.length - 12} more — keep typing</div>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -3891,13 +3918,13 @@ function RosterV2({ facility, isAdmin }) {
         </div>
       </RosterSection>
 
-      <RosterSection title="Facility team" count={fac.team.filter(hit).length + " people"} action={isAdmin ? () => setAdding({ kind: "team" }) : null}>
+      <RosterSection title="Facility team" count={fac.team.length + " people"} action={isAdmin ? () => setAdding({ kind: "team" }) : null}>
         <div style={{ overflowX: "auto" }}>
           <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
             <RosterCols admin={isAdmin} />
             <thead><tr>{["Role","Name","Email","Phone","Notes"].map((h) => <th key={h} className="px-3 py-1.5 text-left" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: BRAND.inkSoft }}>{h}</th>)}{isAdmin && <th />}</tr></thead>
             <tbody>
-              {fac.team.map((p, i) => hit(p) && <RosterPersonRow key={i} p={p} cols={teamCols} onEdit={isAdmin ? () => setEditing({ kind: "person", idx: i }) : null} />)}
+              {fac.team.map((p, i) => <RosterPersonRow key={i} rowId={"rv2-team-" + i} flash={flashId === "rv2-team-" + i} p={p} cols={teamCols} onEdit={isAdmin ? () => setEditing({ kind: "person", idx: i }) : null} />)}
             </tbody>
           </table>
         </div>
@@ -3906,7 +3933,7 @@ function RosterV2({ facility, isAdmin }) {
       <RosterSection title="Regionals for this facility" sub="Corporate staff assigned to this building" count={myRegionals.length + " people"} action={isAdmin ? () => setAdding({ kind: "regional" }) : null}>
         <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
           <RosterCols admin={isAdmin} />
-          <tbody>{myRegionals.map((p, i) => <RosterPersonRow key={i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "regional", name: p.name, title: p.title }) : null} />)}</tbody>
+          <tbody>{myRegionals.map((p, i) => <RosterPersonRow key={i} rowId={"rv2-reg-" + i} flash={flashId === "rv2-reg-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "regional", name: p.name, title: p.title }) : null} />)}</tbody>
         </table>
       </RosterSection>
 
@@ -3920,7 +3947,7 @@ function RosterV2({ facility, isAdmin }) {
               if (!people.length) return null;
               return [
                 <tr key={g.group}><td colSpan={isAdmin ? 6 : 5} className="px-3 py-1" style={{ background: BRAND.paper, fontSize: 11, fontWeight: 600, color: BRAND.inkSoft, textTransform: "uppercase", letterSpacing: ".06em", borderTop: `1px solid ${BRAND.line}` }}>{g.group}</td></tr>,
-                ...g.people.map((p, i) => hit(p) ? <RosterPersonRow key={g.group + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "corp", gi, i }) : null} /> : null),
+                ...g.people.map((p, i) => <RosterPersonRow key={g.group + i} rowId={"rv2-corp-" + gi + "-" + i} flash={flashId === "rv2-corp-" + gi + "-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "corp", gi, i }) : null} />),
               ];
             })}
           </tbody>
@@ -3952,7 +3979,7 @@ function RosterV2({ facility, isAdmin }) {
                 {pt.address && <div style={{ fontSize: 12, color: BRAND.inkSoft, marginTop: 2 }}>{pt.address}</div>}
                 <table className="w-full mt-1" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
                   <RosterCols admin={isAdmin} />
-                  <tbody>{pt.people.map((p, i) => hit(p) ? <RosterPersonRow key={i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} /> : null)}</tbody>
+                  <tbody>{pt.people.map((p, i) => <RosterPersonRow key={i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />)}</tbody>
                 </table>
               </div>
             ))}
@@ -3978,7 +4005,7 @@ function RosterV2({ facility, isAdmin }) {
                     </span>
                   </td>
                 </tr>,
-                ...pt.people.map((p, i) => hit(p) ? <RosterPersonRow key={pt.org + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} /> : null),
+                ...pt.people.map((p, i) => <RosterPersonRow key={pt.org + i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />),
               ])}
             </tbody>
           </table>
