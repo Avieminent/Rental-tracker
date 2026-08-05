@@ -247,7 +247,7 @@ app.get("/api/bootstrap", authenticate, wrap(async (req, res) => {
   const ids = facilities.map((f) => f.id);
   const records = ids.length
     ? (await pool.query(
-        "select id, facility_id, module, collection, data from record where facility_id = any($1) order by created_at",
+        "select id, facility_id, module, collection, data from record where facility_id = any($1) or facility_id is null order by created_at",
         [ids]
       )).rows
     : [];
@@ -318,7 +318,8 @@ app.post("/api/census-done", authenticate, wrap(async (req, res) => {
 app.post("/api/records", authenticate, wrap(async (req, res) => {
   const { module, collection, facilityId, data } = req.body || {};
   if (!module || !collection || !facilityId) throw httpError(400, "module, collection and facilityId are required.");
-  assertFacility(req.user, facilityId);
+  if (facilityId == null) { if (req.user.role !== "admin") throw httpError(403, "Only administrators can write company-wide records."); }
+  else assertFacility(req.user, facilityId);
   const { rows } = await pool.query(
     "insert into record (facility_id, module, collection, data) values ($1,$2,$3,$4) returning id",
     [facilityId, module, collection, data || {}]
@@ -327,17 +328,40 @@ app.post("/api/records", authenticate, wrap(async (req, res) => {
   auditReq(req, "create", { facilityId, recordId: rows[0].id, module, detail: collection });
 }));
 
+/* ---------- org-wide documents (shared across all facilities) ----------
+   Table (run once in Neon):
+   create table if not exists org_doc (key text primary key, data jsonb not null, updated_at timestamptz default now());
+*/
+app.get("/api/org/:key", authenticate, wrap(async (req, res) => {
+  const key = String(req.params.key || "").slice(0, 40);
+  const { rows } = await pool.query("select data, updated_at from org_doc where key = $1", [key]);
+  res.json(rows[0] || null);
+}));
+
+app.put("/api/org/:key", authenticate, requireAdmin, wrap(async (req, res) => {
+  const key = String(req.params.key || "").slice(0, 40);
+  const data = req.body && req.body.data;
+  if (!data || typeof data !== "object") throw httpError(400, "Missing data.");
+  await pool.query(
+    "insert into org_doc (key, data, updated_at) values ($1, $2, now()) on conflict (key) do update set data = $2, updated_at = now()",
+    [key, JSON.stringify(data)]
+  );
+  auditReq(req, "update", { detail: `org:${key}` });
+  res.json({ ok: true });
+}));
+
 app.get("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows } = await pool.query("select id, facility_id, module, collection, data from record where id = $1", [req.params.id]);
   if (!rows[0]) throw httpError(404, "Record not found.");
-  assertFacility(req.user, rows[0].facility_id);
+  if (rows[0].facility_id != null) assertFacility(req.user, rows[0].facility_id);
   res.json({ id: String(rows[0].id), facilityId: rows[0].facility_id, module: rows[0].module, collection: rows[0].collection, data: rows[0].data });
 }));
 
 app.patch("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select facility_id, module, collection from record where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Record not found.");
-  assertFacility(req.user, found[0].facility_id);
+  if (found[0].facility_id == null) { if (req.user.role !== "admin") throw httpError(403, "Only administrators can change company-wide records."); }
+  else assertFacility(req.user, found[0].facility_id);
   await pool.query("update record set data = $2 where id = $1", [req.params.id, (req.body || {}).data || {}]);
   res.json({ ok: true });
   auditReq(req, "update", { facilityId: found[0].facility_id, recordId: req.params.id, module: found[0].module, detail: found[0].collection });
@@ -346,7 +370,8 @@ app.patch("/api/records/:id", authenticate, wrap(async (req, res) => {
 app.delete("/api/records/:id", authenticate, wrap(async (req, res) => {
   const { rows: found } = await pool.query("select facility_id, module, collection from record where id = $1", [req.params.id]);
   if (!found[0]) throw httpError(404, "Record not found.");
-  assertFacility(req.user, found[0].facility_id);
+  if (found[0].facility_id == null) { if (req.user.role !== "admin") throw httpError(403, "Only administrators can change company-wide records."); }
+  else assertFacility(req.user, found[0].facility_id);
   await pool.query("delete from record where id = $1", [req.params.id]);
   res.status(204).end();
   auditReq(req, "delete", { facilityId: found[0].facility_id, recordId: req.params.id, module: found[0].module, detail: found[0].collection });
