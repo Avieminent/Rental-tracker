@@ -1,6 +1,23 @@
-import { useState, useEffect, useMemo, useRef, Component, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, Component } from "react";
+import * as Sentry from "@sentry/react";
+import ExcelJS from "exceljs";
+
+// --- Error monitoring (Sentry). Only turns on if a DSN is configured in the host (Vercel env). ---
+const SENTRY_DSN = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_SENTRY_DSN) || "";
+if (SENTRY_DSN) {
+  try {
+    Sentry.init({
+      dsn: SENTRY_DSN,
+      environment: (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.MODE) || "production",
+      tracesSampleRate: 0.1,
+      // Don't send errors while developing locally.
+      beforeSend: (event) => (location.hostname === "localhost" ? null : event),
+    });
+  } catch (e) { /* monitoring must never break the app */ }
+}
+
 import {
-  Plus, Pencil, Trash2, X, Search, ChevronRight, Save, Upload, LayoutDashboard, Package, CheckCircle2, AlertTriangle, User, Users, Activity, Building2, Briefcase, Wallet, History, KeyRound, Landmark, LogOut, ChevronLeft, AlertCircle, Check, DollarSign, ClipboardList, FileText, Home, CircleDot, ShieldCheck, Flag, ChevronDown, Archive, Eye, EyeOff } from "lucide-react";
+  Plus, Pencil, Trash2, X, Search, ChevronRight, Save, Upload, LayoutDashboard, Package, CheckCircle2, AlertTriangle, User, Users, Activity, Building2, Briefcase, Wallet, History, KeyRound, Landmark, Eye, EyeOff } from "lucide-react";
 
 /* ============================ Brand ============================ */
 const BRAND = {
@@ -87,20 +104,7 @@ function applyFacilities(list) {
 /* ============================ API client ============================ */
 const API_BASE = (typeof window !== "undefined" && window.__ECG_API_URL__) || "";
 let TOKEN = null;
-const previewFacilityList = () => ["Eden", "Highland Park", "The Pearl", "Champion City", "Alpine", "Aristos", "Aspen Glen"]
-  .map((name) => { const m = FACILITY_META[name] || {}; return { id: "fac-" + name.toLowerCase().replace(/\s+/g, "-"), name, tagline: "", location: "",
-    beds: m.beds, rdo: m.rdo, rdcs: m.rdcs, nha: m.nha, don: m.don, survey: m.survey,
-    rating_overall: m.ratingOverall, rating_staffing: m.ratingStaffing, total_staff: m.totalStaff, open_roles: m.openRoles }; });
 async function api(path, method = "GET", body) {
-  /* PREVIEW MODE: answer everything locally — no server. */
-  if (path === "/api/bootstrap") return { facilities: previewFacilityList(), records: [] };
-  if (path === "/api/users") return [];
-  if (path === "/api/audit") return [];
-  if (path === "/api/records" && method === "POST") return { id: uid() };
-  if (path.startsWith("/api/records/")) return null;
-  return null;
-}
-async function realApi(path, method = "GET", body) {
   const res = await fetch(API_BASE + path, {
     method,
     headers: { "Content-Type": "application/json", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
@@ -130,29 +134,6 @@ function recordsToData(records) {
 }
 const fid = (name) => FACILITIES.find((f) => f.name === name).id;
 const RI = (o) => ({ id: uid(), vendor: "", comments: "", ...o });
-function seed() {
-  const rentals = {};
-  FACILITIES.forEach((f) => (rentals[f.id] = []));
-  // Sample rows use obvious placeholder names only — never real residents (PHI).
-  rentals[fid("Champion City")] = [
-    RI({ resident: "SAMPLE Resident 1", room: "101-A", status: "Renting", equipment: '36" air mattress', category: "Mattress/Bed", startDate: "2026-04-16", daily: 6, monthly: 180, purchase: 335, comments: "Sample entry" }),
-    RI({ resident: "SAMPLE Resident 2", room: "102-A", status: "On order", equipment: "Scoop Mattress", category: "Mattress/Bed", startDate: "2026-03-12", daily: 9, monthly: 270, purchase: 216 }),
-  ];
-  const residents = [];
-  const modules = { roster: {}, census: {}, rehosp: {}, ar: {}, staffing: {} };
-  FACILITIES.forEach((f) => {
-    const m = FACILITY_META[f.name] || {};
-    const staff = [];
-    if (m.nha && !/OPEN|Vacant/i.test(m.nha)) staff.push({ id: uid(), dept: "Administration", name: m.nha, title: "Administrator (NHA)", phone: "", email: "" });
-    if (m.don && !/OPEN|—/.test(m.don)) staff.push({ id: uid(), dept: "Nursing", name: m.don, title: "Director of Nursing", phone: "", email: "" });
-    modules.roster[f.id] = { staff };
-  });
-  // Minimal sample rows so a page isn't blank — placeholder data only.
-  const cc = fid("Champion City");
-  modules.staffing[cc] = { open: [{ id: uid(), dept: "Nursing", title: "RN - Night", ftpt: "FT", opened: "2026-05-01", status: "Open", priority: "Critical", candidate: "" }], licenses: [{ id: uid(), employee: "SAMPLE Employee", role: "RN", credential: "RN", licNo: "PA-000000", expiration: "2026-07-15", comments: "" }], turnover: [] };
-
-  return { rentals, modules };
-}
 
 /* ============================ Storage ============================ */
 
@@ -523,15 +504,6 @@ function RosterStaffModal({ row, onClose, onSave }) {
 const toastStore = {
   msg: null, listeners: new Set(), _t: null,
   show(m) { this.msg = m; clearTimeout(this._t); this._t = setTimeout(() => { this.msg = null; this.listeners.forEach((l) => l()); }, 7000); this.listeners.forEach((l) => l()); },
-  backfillResident(fac, bedId, fields, fromISO) {
-    const apply = (arr) => arr.map(r => r.id === bedId
-      ? { ...r, name:fields.name, mf:fields.mf, vent:fields.vent, payer:fields.payer, status:"Active", admit: fromISO, spend:[], trust:undefined, trustHistory:undefined, payerLog:[], hospLog:[], hosp:{}, disc:{}, death:{} }
-      : r);
-    const hist = this.history[fac] || (this.history[fac] = {});
-    Object.keys(hist).forEach(day => { if (day >= fromISO && Array.isArray(hist[day])) hist[day] = apply(hist[day]); });
-    if (this.data[fac]) this.data[fac] = apply(this.data[fac]);
-    this.listeners.forEach((l) => l());
-  },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
 const toast = (m) => { toastStore.show(m); try { if (typeof window !== "undefined" && !window.__ECG_PREVIEW_NO_ALERT) { /* toast only */ } } catch {} };
@@ -602,6 +574,7 @@ const bedboardStore = {
   facilityId: {},
   saveTimer: {},
   baseline: {},
+  pendingV1: {},     // facilityName -> true while the upgrade awaits an admin's approval (saves blocked)
   migrationNote: {}, // facilityName -> one-time conversion report (shown to admins)
   listeners: new Set(),
 
@@ -635,7 +608,7 @@ const bedboardStore = {
     });
   },
 
-  get(fac) { if (!this._seeded) { try { this.hydrate(); } catch(e){} } if (!this.beds[fac]) this._initEmpty(fac); return this._join(fac); },
+  get(fac) { if (!this.beds[fac]) this._initEmpty(fac); return this._join(fac); },
   _initEmpty(fac) {
     this.people[fac] = this.people[fac] || {};
     this.beds[fac] = [];
@@ -707,6 +680,7 @@ const bedboardStore = {
     vacated.forEach(fid => { if (!landed.has(fid)) byId[fid].residentId = null; });
     (this.history[fac] = this.history[fac] || {})[todayISO()] = this._join(fac);
     this.listeners.forEach(l => l());
+    this.persist(fac);
   },
 
   // Append a change-log entry (payer or vent) to the person on a bed.
@@ -718,6 +692,7 @@ const bedboardStore = {
     if (!p) return;
     ppl[p.id] = { ...p, payerLog: [...(p.payerLog || []), entry] };
     this.listeners.forEach(l => l());
+    this.persist(fac);
   },
 
   // Write a status (e.g. a backdated hospitalization) onto saved days from a date forward,
@@ -738,6 +713,7 @@ const bedboardStore = {
         hist[day] = hist[day].map(x => isP(x) ? { ...x, ...patch } : x);
     });
     this.listeners.forEach(l => l());
+    this.persist(fac);
   },
 
   // ---- Later-activity scan for the backdate warning (by resident id, name fallback for old days). ----
@@ -833,43 +809,95 @@ const bedboardStore = {
     this.persist(fac);
   },
 
-  // PREVIEW: demo residents + 10 days of history, built directly in v2 shape.
-  hydrate() {
-    if (this._seeded) return; this._seeded = true;
-    try { if (!FACILITIES.length) applyFacilities(previewFacilityList()); } catch (e) {}
-    const iso = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0,10); };
-    const FIRST = ["James","Mary","Robert","Patricia","John","Jennifer","Michael","Linda","David","Barbara","William","Elizabeth","Richard","Susan","Joseph","Margaret"];
-    const LAST = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Wilson","Moore","Taylor","Anderson","Thomas","Jackson","White","Harris"];
-    const PAYER_CODES = ["MCA","MCD","MR","MC","PVT"];
-    let fi=0, li=0;
-    (FACILITIES||[]).forEach(f => {
-      const ppl = this.people[f.name] = {};
-      const beds = this.beds[f.name] = [];
-      let idx=0;
-      (BEDBOARD_LAYOUT[f.name]||[]).forEach(w => w.beds.forEach(b => {
-        const bed = { id: uid(), wing: w.wing, room: b.room, residentId: null };
-        if (idx % 3 !== 0) {
-          const pid = "res_" + uid();
-          ppl[pid] = { id: pid, name: FIRST[fi++%FIRST.length]+" "+LAST[li++%LAST.length], status:"Active",
-            mf: idx%2===0?"M":"F", vent: idx%11===0, payer: PAYER_CODES[idx%PAYER_CODES.length],
-            admit: iso(15+(idx%12)), spend:[], payerLog:[], hospLog:[], hosp:{}, disc:{}, death:{} };
-          bed.residentId = pid;
-        }
-        beds.push(bed); idx++;
-      }));
-      // 10 days of history: same board, with one demo payer conversion mid-way
-      const hist = this.history[f.name] = {};
-      const joined = this._join(f.name);
-      const convRow = joined.find(r => r.name);
-      for (let d=10; d>=0; d--) {
-        hist[iso(d)] = joined.map(r => {
-          if (convRow && r.id === convRow.id && d > 5) return { ...r, payer: "MCA" };
-          return { ...r };
-        });
+  // ============ HYDRATE + ONE-TIME v1 -> v2 CONVERSION ============
+  hydrate(records, facilities) {
+    (facilities || []).forEach(f => { this.facilityId[f.name] = f.id; });
+    (records || []).forEach(r => {
+      if (r.module !== "census" || r.collection !== "board") return;
+      const f = (facilities || []).find(x => x.id === r.facility_id);
+      if (!f) return;
+      this.recordId[f.name] = r.id;
+      const d = r.data || {};
+      if (d.v === 2 && d.people) {
+        this.people[f.name] = d.people || {};
+        this.beds[f.name] = Array.isArray(d.beds) ? d.beds : [];
+        this.history[f.name] = d.history || {};
+      } else {
+        this._convertV1(f.name, d); // in-memory so the app can display; NOTHING saves until an admin approves
+        this.pendingV1[f.name] = true;
       }
+      this._setBaseline(f.name, this._snapPayload(f.name));
     });
     this.listeners.forEach(l => l());
   },
+
+  _convertV1(fac, d) {
+    const rows = Array.isArray(d.residents) ? d.residents : [];
+    const leftV1 = Array.isArray(d.left) ? d.left : [];
+    const histV1 = d.history || {};
+    const ppl = this.people[fac] = {};
+    const beds = this.beds[fac] = [];
+    let converted = 0, keptLeft = 0, recovered = 0;
+    // 1. Board rows -> beds (+ people for occupied)
+    rows.forEach(r => {
+      const bed = { id: r.id, wing: r.wing, room: r.room, residentId: null };
+      if (r.name) {
+        const pid = "res_" + uid();
+        const person = { ...r }; delete person.id;
+        if (TERMINAL.includes(r.status)) {
+          // LEGACY: a discharged/deceased resident still written on the bed row (pre-upgrade design).
+          // They must NOT occupy the bed — convert them like a left-list person so the bed is safely
+          // empty and their record (funds, history) is protected from being overwritten by a new admit.
+          const detail = r.status === "Deceased" ? (r.death || {}) : (r.disc || {});
+          ppl[pid] = { ...person, id: pid, leftReason: r.status, leftStatus: r.status,
+            leftDate: detail.date || todayISO(), leftDetail: detail, bedIdAtExit: r.id };
+          keptLeft++;
+        } else if (r.status === "Hospitalization" && r.hosp && r.hosp.bedhold !== "Y" && !r.hosp.expectedReturn) {
+          // LEGACY: hospitalized with no bedhold recorded before "expected to return" existed.
+          // Safest: keep them, mark expected-return Yes (bed reserved, not billed, not fillable)
+          // so a new admit can't overwrite them; staff resolve their real state later.
+          ppl[pid] = { ...person, id: pid, hosp: { ...r.hosp, expectedReturn: "Y" } };
+          bed.residentId = pid; converted++;
+        } else {
+          ppl[pid] = { ...person, id: pid };
+          bed.residentId = pid; converted++;
+        }
+      }
+      beds.push(bed);
+    });
+    // 2. Left list -> people (already person-shaped with ids)
+    leftV1.forEach(p => { ppl[p.id] = { ...p }; keptLeft++; });
+    // 3. History: annotate rows with residentId (bed+name match), recover lost people
+    const liveByBedName = {}; beds.forEach(b => { if (b.residentId) liveByBedName[b.id + "\u0000" + ppl[b.residentId].name] = b.residentId; });
+    const leftByName = {}; leftV1.forEach(p => { leftByName[p.name] = p.id; });
+    const hist = this.history[fac] = {};
+    const seenGone = {}; // name+bed -> recovered pid
+    const dayKeys = Object.keys(histV1).sort();
+    dayKeys.forEach(day => {
+      const snap = histV1[day];
+      if (!Array.isArray(snap)) return;
+      hist[day] = snap.map(x => {
+        if (!x.name) return { ...x, residentId: null };
+        let pid = liveByBedName[x.id + "\u0000" + x.name] || leftByName[x.name] || null;
+        if (!pid) {
+          const k = x.id + "\u0000" + x.name;
+          if (!seenGone[k]) {
+            const npid = "res_" + uid();
+            const person = { ...x }; delete person.id; delete person.residentId;
+            ppl[npid] = { ...person, id: npid, leftReason: TERMINAL.includes(x.status) ? x.status : "Discharged", leftStatus: TERMINAL.includes(x.status) ? x.status : "Discharged", leftDate: day, leftDetail: { note: "Recovered from history during the resident-ID upgrade" }, bedIdAtExit: x.id, status: TERMINAL.includes(x.status) ? x.status : "Discharged" };
+            seenGone[k] = npid; recovered++;
+          }
+          pid = seenGone[k];
+          // keep their last-seen day updated so leftDate ends up as the LAST day they appear
+          if (ppl[pid] && ppl[pid].leftDetail && ppl[pid].leftDetail.note) ppl[pid].leftDate = day;
+        }
+        return { ...x, residentId: pid };
+      });
+    });
+    this.migrationNote[fac] = { converted, keptLeft, recovered, days: dayKeys.length };
+    this._needsBackup = this._needsBackup || {}; this._needsBackup[fac] = d; // original payload, backed up on first save
+  },
+
   _snapPayload(fac) { return { type: "board", v: 2, people: this.people[fac] || {}, beds: this.beds[fac] || [], history: this.history[fac] || {} }; },
   _setBaseline(fac, payload) { try { this.baseline[fac] = JSON.parse(JSON.stringify(payload)); } catch { this.baseline[fac] = null; } },
 
@@ -909,7 +937,59 @@ const bedboardStore = {
     return { type: "board", v: 2, people: mergedPeople, beds: mergedBeds, history: mergedHist };
   },
 
-  persist() {},
+  persist(fac) {
+    if (this.pendingV1[fac]) return; // upgrade not approved yet — nothing is written to the database
+    clearTimeout(this.saveTimer[fac]);
+    this.saveTimer[fac] = setTimeout(async () => {
+      const fid = this.facilityId[fac];
+      if (!fid) return;
+      let payload = this._snapPayload(fac);
+      try {
+        // Committing a conversion? If another admin already converted this facility, ADOPT their
+        // version instead of saving ours — two independent conversions must never both commit
+        // (they would create duplicate resident records).
+        if (this._needsBackup && this._needsBackup[fac] && this.recordId[fac]) {
+          try {
+            const remote = await api(`/api/records/${this.recordId[fac]}`);
+            if (remote && remote.data && remote.data.v === 2 && remote.data.people) {
+              this.people[fac] = remote.data.people; this.beds[fac] = remote.data.beds || []; this.history[fac] = remote.data.history || {};
+              delete this._needsBackup[fac];
+              this._setBaseline(fac, this._snapPayload(fac));
+              this.listeners.forEach(l => l());
+              return; // theirs is now ours; nothing to save
+            }
+          } catch { /* can't check — proceed with normal backup path */ }
+        }
+        // One-time safety backup of the pre-upgrade board, before the first v2 save.
+        if (this._needsBackup && this._needsBackup[fac]) {
+          try { await createRecord("census", "board-v1-backup", fid, this._needsBackup[fac]); delete this._needsBackup[fac]; }
+          catch { onErr(); return; /* backup failed — surface it; NEVER save v2 over v1 without a backup */ }
+        }
+        if (this.recordId[fac]) {
+          try {
+            const remote = await api(`/api/records/${this.recordId[fac]}`);
+            const theirs = remote && remote.data;
+            if (theirs && theirs.v === 2 && this.baseline[fac] && JSON.stringify(theirs) !== JSON.stringify(this.baseline[fac])) {
+              payload = this._mergeV2(this.baseline[fac], payload, theirs);
+              this.people[fac] = payload.people; this.beds[fac] = payload.beds; this.history[fac] = payload.history;
+              this.listeners.forEach(l => l());
+            }
+          } catch { /* GET failed — plain save */ }
+          await updateRecord(this.recordId[fac], payload);
+        } else {
+          const id = await createRecord("census", "board", fid, payload);
+          this.recordId[fac] = id;
+        }
+        this._setBaseline(fac, payload);
+      } catch { onErr(); }
+    }, 800);
+  },
+  // Admin pressed "Convert now": open the gate and commit (backup runs first inside persist).
+  approveConversion(fac) {
+    delete this.pendingV1[fac];
+    this.listeners.forEach(l => l());
+    this.persist(fac);
+  },
   subscribe(l) { this.listeners.add(l); return () => this.listeners.delete(l); },
 };
 
@@ -1012,15 +1092,84 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
     if (HOSP.includes(status) || TERMINAL.includes(status)) { setModal({ id, status }); return; }
     applyStatus(id, status);
   };
+  // Apply a whole shuffle at once. moves = [{ fromId, toId }] where fromId is the
+  // resident being moved and toId is the destination BED (row) they move into.
   const applyShuffle = (moves) => {
+    // v2: a move is a pointer change — the person record never moves, so trust, spend,
+    // payer history and hospital history physically cannot be lost or swapped.
     bedboardStore.applyMoves(facility, moves);
     setShuffleFor(null);
   };
 
-  const exportBoard = () => {
+  // Move a resident's details into an empty destination bed, and clear the bed they left.
+
+  
+  const [sendingDone, setSendingDone] = useState(false);
+  const sendCensusDone = async () => {
+    if (sendingDone) return;
+    setSendingDone(true);
+    try {
+      const iso = todayISO();
+      const wb = await buildBedboardWorkbook(facility, iso, res, counts, boxesFor(iso, res));
+      const buf = await wb.xlsx.writeBuffer();
+      let bin = ""; const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      const xlsxBase64 = btoa(bin);
+      const admitsToday = res.filter(r => r.admit === iso).length;
+      const leftToday = bedboardStore.getLeft(facility).filter(p => p.leftLogged === iso).length;
+      const out = await api("/api/census-done", "POST", {
+        facilityId: fac.id, facilityName: facility, dateISO: iso,
+        summary: { occ: counts.occ, avail: counts.avail, hosp: counts.hosp, bh: counts.bh, admits: admitsToday, left: leftToday },
+        xlsxBase64,
+      });
+      toast(`Update email sent to ${out.sent} recipient${out.sent===1?"":"s"}.`);
+    } catch (e) { toast(e.message || "The email could not be sent."); }
+    setSendingDone(false);
+  };
+// The side boxes for a given day's sheet: what happened ON that day (with amber for backfills).
+  const boxesFor = (iso, rows) => {
+    const left = bedboardStore.getLeft(facility);
+    const hosp = rows.filter(r => !r._left && r.status === "Hospitalization")
+      .map(r => ({ name: r.name, room: r.room, date: r.hosp?.date || "", bedhold: r.hosp?.bedhold === "Y" ? "Y" : "N" }));
+    // Same rule as the app's boxes: exporting TODAY = everything LOGGED today (incl.
+    // backfills, amber); exporting a past date = what happened ON that day (amber if logged late).
+    const isToday = iso === todayISO();
+    const leftMatch = (p) => isToday ? p.leftLogged === iso : p.leftDate === iso;
+    const discharges = left.filter(p => p.leftReason === "Discharged" && leftMatch(p))
+      .map(p => ({ name: p.name, room: p.room, date: p.leftDate, to: p.leftDetail?.dischargedTo || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
+    const deaths = left.filter(p => p.leftReason === "Deceased" && leftMatch(p))
+      .map(p => ({ name: p.name, room: p.room, date: p.leftDate, cause: p.leftDetail?.cause || "", hl: p.leftLogged && p.leftLogged !== p.leftDate }));
+    const changes = [];
+    const chMatch = (c) => isToday ? (c.loggedDate || c.date) === iso : c.date === iso;
+    const scan = (r, nm, rm) => (r.payerLog || []).forEach(c => { if (chMatch(c)) changes.push({ name: nm, room: rm, kind: c.kind || "payer", from: c.from, to: c.to, date: c.date, loggedDate: c.loggedDate || c.date, hl: c.loggedDate && c.loggedDate !== c.date }); });
+    res.forEach(r => r.name && scan(r, r.name, r.room));
+    left.forEach(p => scan(p, p.name, p.room));
+    const mix = {};
+    rows.forEach(r => { if (!r._left && r.payer && holdsBed(r)) mix[r.payer] = (mix[r.payer] || 0) + 1; });
+    const payerMix = Object.entries(mix).sort((a, b) => b[1] - a[1]);
+    const admissions = rows.filter(r => !r._left && r.status === "Admitting").map(r => ({ name: r.name || "(new)", mf: r.mf || "", payer: r.payer || "", room: r.room }));
+    let cm = 0, cf = 0, cv = 0;
+    rows.forEach(r => { if (r._left) return; if (IN_FACILITY.includes(r.status)) { if (r.mf === "M") cm++; if (r.mf === "F") cf++; } if (r.vent) cv++; });
+    const census = [["Male", cm], ["Female", cf], ["Vent", cv]];
+    return { hosp, discharges, deaths, changes, payerMix, admissions, census };
+  };
+
+  const exportBoard = async () => {
     const iso = viewing ? viewDate : todayISO();
     const rows = displayRes;
     if (!rows || !rows.length) { toast(`No census data to export for ${iso}.`); return; }
+    try {
+      const wb = await buildBedboardWorkbook(facility, iso, rows, counts, boxesFor(iso, rows));
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `Bedboard_${facility.replace(/\s+/g, "_")}_${iso}.xlsx`;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("Bed board exported.");
+    } catch (e) { toast("Export failed: " + e.message); }
+    return;
+    // (previous CSV export kept below, unreachable)
     const out = [["Date","Wing","Room","Name","Payer","M/F","Vent","Status","Admit date"]];
     rows.forEach((r) => out.push([iso, r.wing, r.room, r.name || "", r.payer || "", r.mf || "", r.vent ? "Y" : "", r.status || "", r.admit || ""]));
     downloadCSV(`Census_${facility.replace(/\s+/g, "_")}_${iso}.csv`, out);
@@ -1168,7 +1317,7 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
             {/* Top row — Export / Import, both same color */}
             <div className="flex items-center gap-2 flex-wrap justify-end">
               <button onClick={exportBoard} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Export</button>
-            <button onClick={()=>toast("On the live site this sends the update email (with the Excel bed board attached) to the facility's recipient list.")} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Update done — email</button>
+            <button onClick={sendCensusDone} disabled={sendingDone} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background: sendingDone ? "#8b93a5" : BRAND.ink }}>{sendingDone ? "Sending…" : "Update done — email"}</button>
               {canImport && (
                 <label className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink, cursor:"pointer" }} title="Replace this board from a CSV file (admin only)">
                   Import
@@ -1197,7 +1346,23 @@ function BedboardModule({ facility: fac, canImport, isAdmin }){
           ))}
         </div>
 
-        {migNote && isAdmin && (
+        {migNote && bedboardStore.pendingV1 && bedboardStore.pendingV1[facility] && (
+        <div className="rounded-lg px-4 py-3 mb-3" style={{ background:"#fdf4dd", border:"1px solid #d9c489", fontSize:13, lineHeight:1.6 }}>
+          <b>⚠️ Upgrade ready — needs approval before anything saves.</b><br/>
+          This facility's board is ready to convert to the new resident-ID system:
+          <b> {migNote.converted}</b> current residents, <b>{migNote.keptLeft}</b> discharged/deceased kept,
+          <b> {migNote.recovered}</b> recovered from history, {migNote.days} days of history preserved.
+          Until it's approved, <b>changes made here are NOT saved</b>. A backup of the old format is stored automatically before the first save.
+          {isAdmin ? (
+            <div style={{ marginTop:8 }}>
+              <button onClick={()=>{ bedboardStore.approveConversion(facility); toast("Converted. Backup stored; changes now save normally."); }} className="text-sm rounded-md px-3 py-1.5 text-white" style={{ background:BRAND.ink }}>Convert now</button>
+            </div>
+          ) : (
+            <div style={{ marginTop:6, color:BRAND.inkSoft }}>Ask an administrator to open this page and press Convert.</div>
+          )}
+        </div>
+      )}
+      {migNote && !(bedboardStore.pendingV1 && bedboardStore.pendingV1[facility]) && isAdmin && (
         <div className="rounded-lg px-4 py-2.5 mb-3" style={{ background:"#eef4ec", border:"1px solid #b7ccb2", fontSize:13 }}>
           ✅ This facility was upgraded to the new resident-ID system: <b>{migNote.converted}</b> current residents converted,
           <b> {migNote.keptLeft}</b> discharged/deceased kept, <b>{migNote.recovered}</b> recovered from history, {migNote.days} days of history preserved.
@@ -1622,6 +1787,200 @@ function AvailModal({ resident, isAdmin, onDischarge, onDeath, onAdminFree, onCa
 
 
 
+// Build the Daily Bed Board as a styled Excel workbook (visual only — plain values, no formulas),
+// mirroring the original facility bedboard layout: title, count tiles, wings side by side.
+async function buildBedboardWorkbook(facilityName, iso, rows, counts, boxes) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Bed Board", { views: [{ showGridLines: false }] });
+  const TINT = { Available:"FFFFFFFF", Active:"FFFFFFFF", Admitting:"FFEAF2FB", "Room Move":"FFF3EEE4", "COVID+":"FFFDECEB", Iso:"FFFDECEB", Hospitalization:"FFFDF4DD", Discharged:"FFEEF0F3", Deceased:"FFEEF0F3", Blocked:"FFF1F1F1" };
+  const INK = "FF1C2B4A", SOFT = "FF6B7280", LINE = "FFD9DCE3";
+  const thin = { style:"thin", color:{ argb: LINE } };
+  const border = { top:thin, bottom:thin, left:thin, right:thin };
+
+  // Right-side boxes land in columns 15-18.
+  [22, 14, 12, 12].forEach((w, i) => { ws.getColumn(15 + i).width = w; });
+  // Wings side by side, two per band, 6 columns each + a gap column.
+  const wings = {};
+  rows.forEach(r => { (wings[r.wing] = wings[r.wing] || []).push(r); });
+  const wingNames = Object.keys(wings);
+  const COLS = ["Room","Name","Status","M/F","Vent","Payer"];
+  const widths = [9, 24, 15, 5, 5, 8];
+  for (let b = 0; b < Math.ceil(wingNames.length/2); b++) {
+    widths.forEach((w,i) => { ws.getColumn(b===0 ? i+1 : 0 || i+1).width = w; });
+  }
+  // set widths for two blocks + gap (cols 1-6, 7 gap, 8-13)
+  [ ...widths, 2, ...widths ].forEach((w, i) => { ws.getColumn(i+1).width = w; });
+
+  // Title
+  ws.mergeCells(1,1,1,13);
+  const t = ws.getCell(1,1); t.value = "DAILY BED BOARD";
+  t.font = { name:"Georgia", size:18, bold:true, color:{ argb: INK } };
+  t.alignment = { horizontal:"center" };
+  ws.mergeCells(2,1,2,13);
+  const sub = ws.getCell(2,1); sub.value = `${facilityName}  ·  ${iso}`;
+  sub.font = { name:"Arial", size:11, color:{ argb: SOFT } };
+  sub.alignment = { horizontal:"center" };
+
+  // Count tiles
+  const tiles = [["TOTAL BEDS",counts.total],["OCCUPIED",counts.occ],["AVAILABLE",counts.avail],["OCCUPANCY",`${counts.occPct}%`],["IN HOSPITAL",counts.hosp],["BEDHOLD",counts.bh],["VENT",counts.vent]];
+  tiles.forEach(([label,val], i) => {
+    const c = 1 + i*2;
+    if (c+1 > 13) return;
+    ws.mergeCells(4,c,4,c+1);
+    const lc = ws.getCell(4,c); lc.value = label; lc.font = { name:"Arial", size:8, bold:true, color:{ argb: SOFT } }; lc.alignment = { horizontal:"center" };
+    ws.mergeCells(5,c,5,c+1);
+    const vc = ws.getCell(5,c); vc.value = val; vc.font = { name:"Georgia", size:14, bold:true, color:{ argb: INK } }; vc.alignment = { horizontal:"center" };
+  });
+
+  // Wing blocks
+  const startCol = (side) => side === 0 ? 1 : 8;
+  let bandRow = 7;
+  for (let i = 0; i < wingNames.length; i += 2) {
+    let bandBottom = bandRow;
+    for (let side = 0; side < 2; side++) {
+      const wing = wingNames[i+side];
+      if (!wing) continue;
+      const list = wings[wing];
+      const c0 = startCol(side);
+      const beds = list.filter(r => !r._left || r._bedFree).length;
+      const occ = list.filter(r => !r._left && (IN_FACILITY.includes(r.status) || (r.status==="Hospitalization" && r.hosp?.bedhold==="Y"))).length;
+      ws.mergeCells(bandRow, c0, bandRow, c0+5);
+      const h = ws.getCell(bandRow, c0);
+      h.value = `${wing}  (${beds} beds · ${occ} occupied)`;
+      h.font = { name:"Georgia", size:12, bold:true, color:{ argb: INK } };
+      h.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFF6F1E7" } };
+      COLS.forEach((cn, ci) => {
+        const cell = ws.getCell(bandRow+1, c0+ci);
+        cell.value = cn; cell.font = { name:"Arial", size:9, bold:true, color:{ argb: SOFT } };
+        cell.border = border;
+      });
+      list.forEach((r, ri) => {
+        const rr = bandRow + 2 + ri;
+        const isLeft = !!r._left;
+        const vals = [r.room||"", (r.name||"") + (isLeft ? `  · left ${r.leftDate||""}` : ""), r.status||"", r.mf||"", r.vent?"Y":"", r.payer||""];
+        vals.forEach((v, ci) => {
+          const cell = ws.getCell(rr, c0+ci);
+          cell.value = v;
+          cell.font = { name:"Arial", size:10, color:{ argb: isLeft ? SOFT : INK }, italic: isLeft };
+          cell.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: TINT[r.status] || "FFFFFFFF" } };
+          cell.border = border;
+        });
+      });
+      bandBottom = Math.max(bandBottom, bandRow + 1 + list.length);
+    }
+    bandRow = bandBottom + 2;
+  }
+
+  // ---- Side boxes (relevant to the exported day) ----
+  if (boxes) {
+    const AMBER = "FFFDF4DD", HEAD = "FFF6F1E7";
+    let br = 7;
+    const boxHeader = (title) => {
+      ws.mergeCells(br, 15, br, 18);
+      const h = ws.getCell(br, 15);
+      h.value = title; h.font = { name:"Georgia", size:11, bold:true, color:{ argb: INK } };
+      h.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: HEAD } };
+      br++;
+    };
+    const boxRows = (cols, list, hlAt) => {
+      cols.forEach((cn, ci) => { const c = ws.getCell(br, 15+ci); c.value = cn; c.font = { name:"Arial", size:8, bold:true, color:{ argb: SOFT } }; c.border = border; });
+      br++;
+      if (!list.length) { const c = ws.getCell(br, 15); c.value = "None"; c.font = { name:"Arial", size:9, italic:true, color:{ argb: SOFT } }; br++; }
+      list.forEach(vals => {
+        const hl = hlAt !== undefined && vals[hlAt];
+        vals.slice(0, 4).forEach((v, ci) => {
+          const c = ws.getCell(br, 15+ci);
+          c.value = v; c.font = { name:"Arial", size:9, color:{ argb: INK } }; c.border = border;
+          if (hl) c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: AMBER } };
+        });
+        br++;
+      });
+      br++; // gap
+    };
+    boxHeader("Status color key");
+    {
+      const KEYS = ["Active","Admitting","Hospitalization","Discharged","Deceased","Available","Blocked","Iso","COVID+","Room Move"];
+      for (let i = 0; i < KEYS.length; i += 2) {
+        [KEYS[i], KEYS[i+1]].forEach((k, side) => {
+          if (!k) return;
+          const c = ws.getCell(br, 15 + side*2);
+          c.value = k; c.font = { name:"Arial", size:9, color:{ argb: INK } };
+          c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb: TINT[k] || "FFFFFFFF" } };
+          c.border = border;
+        });
+        br++;
+      }
+      br++;
+    }
+    boxHeader("In hospital");
+    boxRows(["Name","Room","Since","Bedhold"], (boxes.hosp||[]).map(x=>[x.name,x.room,x.date,x.bedhold]));
+    boxHeader("Discharges — " + iso);
+    boxRows(["Name","Room","Date","To"], (boxes.discharges||[]).map(x=>[x.name,x.room,x.date,x.to,x.hl]), 4);
+    boxHeader("Deaths — " + iso);
+    boxRows(["Name","Room","Date","Cause"], (boxes.deaths||[]).map(x=>[x.name,x.room,x.date,x.cause,x.hl]), 4);
+    boxHeader("Payer / vent / status changes — " + iso);
+    boxRows(["Name","Change","Effective","Logged"], (boxes.changes||[]).map(x=>[x.name, `${x.kind==="vent"?"Vent ":x.kind==="status"?"Status ":""}${x.from||"—"} → ${x.to||"—"}`, x.date, x.loggedDate, x.hl]), 4);
+    boxHeader("Admissions");
+    boxRows(["Name","M/F","Payer","Room"], (boxes.admissions||[]).map(x=>[x.name,x.mf,x.payer,x.room]));
+    boxHeader("Census");
+    boxRows(["","Count","",""], (boxes.census||[]).map(([k,v])=>[k, v, "", ""]));
+    boxHeader("Payer mix");
+    boxRows(["Payer","Count","",""], (boxes.payerMix||[]).map(([k,v])=>[k, v, "", ""]));
+  }
+  return wb;
+}
+
+
+// Admin: per-facility recipient list for the census "update done" email.
+function RecipientsManager({ facilities, onClose }){
+  const [facId, setFacId] = useState(facilities[0]?.id || "");
+  const [emails, setEmails] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const load = async (id) => { setErr(""); try { const r = await api(`/api/census-recipients/${id}`); setEmails(r.emails || []); } catch (e) { setErr(e.message); } };
+  useEffect(() => { if (facId) load(facId); }, [facId]);
+  const save = async (list) => {
+    setBusy(true); setErr("");
+    try { const r = await api(`/api/census-recipients/${facId}`, "PUT", { emails: list }); setEmails(r.emails || list); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const add = () => {
+    const e = draft.trim().toLowerCase();
+    if (!/.+@.+\..+/.test(e)) { setErr("That doesn't look like an email address."); return; }
+    if (emails.includes(e)) { setDraft(""); return; }
+    setDraft(""); save([...emails, e]);
+  };
+  return (
+    <Modal title="Census update emails" onClose={onClose}>
+      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:10 }}>
+        When someone presses "Update done — email" on a facility's census, these people get the email (with the bed board attached).
+      </div>
+      <L label="Facility"><select value={facId} onChange={e=>setFacId(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>
+        {facilities.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+      </select></L>
+      <div style={{ height:10 }} />
+      <div className="flex gap-2">
+        <input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="name@eminentcaregroup.com"
+          className="flex-1 rounded-md px-3 py-2 text-sm" style={{ border:`1px solid ${BRAND.line}` }} />
+        <button onClick={add} disabled={busy} className="text-sm rounded-md px-3 py-2 text-white" style={{ background:BRAND.ink }}>Add</button>
+      </div>
+      {err && <div style={{ fontSize:12, color:"#a33", marginTop:8 }}>{err}</div>}
+      <div style={{ marginTop:12 }}>
+        {emails.length === 0 ? <div style={{ fontSize:12, color:BRAND.inkSoft }}>No recipients yet for this facility.</div>
+          : emails.map(e => (
+            <div key={e} className="flex items-center justify-between" style={{ padding:"6px 2px", borderTop:`1px solid ${BRAND.lineSoft}`, fontSize:13 }}>
+              <span>{e}</span>
+              <button onClick={()=>save(emails.filter(x=>x!==e))} disabled={busy} style={{ color:BRAND.inkSoft, background:"none", border:"none", cursor:"pointer", fontSize:12 }}>remove</button>
+            </div>
+          ))}
+      </div>
+    </Modal>
+  );
+}
+
+
 // ---- Shared census-history helpers (used by the census page and PPD budgets) ----
 const bbSnapForDate = (fac, iso) => {
   const hist = bedboardStore.history[fac] || {};
@@ -1698,6 +2057,7 @@ function SearchJump({ items, placeholder }){
 }
 
 function AddModal({ openBeds, backfillDate, genderConflict, onAdd, onCancel }){
+  // openBeds: [{ id, wing, room }] — beds with no current resident. Adding fills one of these.
   const [f,setF]=useState({ bedId: openBeds[0]?.id || "", name:"", payer:"", mf:"", vent:false });
   const [ack,setAck]=useState(false);
   const set=(k,v)=>{ setF(s=>({...s,[k]:v})); if (k==="bedId"||k==="mf") setAck(false); };
@@ -1910,6 +2270,7 @@ function ShuffleModal({ seedId, beds, onCancel, onApply }){
   rows.forEach(r => {
     if (r.toId) { const d = bed(r.toId); if (d && d.occupied && !rows.some(x => x.fromId === r.toId)) problems.push(`${d.name || d.room} was bumped and still needs a room.`); }
   });
+  // Post-move gender check: simulate where everyone lands, then flag mixed rooms a move creates.
   const [gAck, setGAck] = useState(false);
   const genderConflicts = (() => {
     if (incomplete) return [];
@@ -3178,8 +3539,36 @@ const supportMailto = (kind, detail) => {
 
 
 class ErrorBoundary extends Component {
-  constructor(p) { super(p); this.state = { error: null }; }
+  constructor(p) { super(p); this.state = { error: null, copied: false }; }
   static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { try { if (SENTRY_DSN) Sentry.captureException(error, { extra: info }); } catch {} }
+  copyReport(detail) {
+    const user = (() => { try { return JSON.parse(localStorage.getItem("ecg_user") || "null")?.email || ""; } catch { return ""; } })();
+    const text = [
+      "To: " + SUPPORT_EMAIL,
+      "Subject: Eminent Central",
+      "",
+      "Something went wrong on Eminent Central. (Please attach a screenshot.)",
+      "",
+      "Page: " + (typeof location !== "undefined" ? location.href : ""),
+      "User: " + user,
+      "Time: " + new Date().toLocaleString(),
+      "Details: " + detail,
+    ].join("\n");
+    const done = () => { this.setState({ copied: true }); setTimeout(() => this.setState({ copied: false }), 2500); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, () => this.fallbackCopy(text, done)); }
+      else this.fallbackCopy(text, done);
+    } catch { this.fallbackCopy(text, done); }
+  }
+  fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta); done();
+    } catch {}
+  }
   render() {
     if (!this.state.error) return this.props.children;
     const detail = String(this.state.error && (this.state.error.message || this.state.error)).slice(0, 300);
@@ -3191,17 +3580,22 @@ class ErrorBoundary extends Component {
           <div style={{ fontSize: 14, color: BRAND.inkSoft, marginBottom: 16, lineHeight: 1.6 }}>
             A gremlin got into the wiring and this page fell over. Hit <b>Reload</b> to dust it off and carry on. If the gremlin keeps at it, tell us and we'll go gremlin-hunting.
           </div>
-          <div className="flex justify-center gap-2 flex-wrap" style={{ marginBottom: 18 }}>
+          <div className="flex justify-center gap-2 flex-wrap" style={{ marginBottom: this.state.copied ? 16 : 0 }}>
             <button onClick={() => location.reload()} className="text-sm rounded-md px-4 py-2 text-white" style={{ background: BRAND.ink }}>Reload the page</button>
-            <a href={supportMailto("App error", detail)} className="text-sm rounded-md px-4 py-2" style={{ border: `1px solid ${BRAND.line}` }}>Report the gremlin</a>
+            <button onClick={() => this.copyReport(detail)} className="text-sm rounded-md px-4 py-2 inline-flex items-center gap-1.5" style={{ border: `1px solid ${this.state.copied ? TONE.ok.dot : BRAND.line}`, color: this.state.copied ? TONE.ok.fg : BRAND.ink, background: this.state.copied ? TONE.ok.bg : "transparent" }}>{this.state.copied ? "✓ Error copied" : "Copy error to report it"}</button>
           </div>
-          <div className="rounded-lg px-3 py-3" style={{ background: BRAND.paper, border: `1px solid ${BRAND.line}`, textAlign: "left" }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: BRAND.inkSoft, marginBottom: 4 }}>If the button doesn't open your email, send one yourself:</div>
-            <div style={{ fontSize: 13 }}>To: <b style={{ userSelect: "all" }}>{SUPPORT_EMAIL}</b></div>
-            <div style={{ fontSize: 13 }}>Subject: <b style={{ userSelect: "all" }}>Eminent Central</b></div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>Please attach a screenshot and paste this bit:</div>
-            <div style={{ fontSize: 11, color: BRAND.inkSoft, marginTop: 4, fontFamily: "ui-monospace, monospace", userSelect: "all", wordBreak: "break-word" }}>{detail}</div>
-          </div>
+          {this.state.copied && (
+            <div className="rounded-xl px-4 py-4 text-left" style={{ background: TONE.ok.bg, border: `1px solid ${TONE.ok.dot}` }}>
+              <div style={{ fontSize: 13, color: TONE.ok.fg, fontWeight: 600, marginBottom: 8 }}>Copied! Last step — send it to us:</div>
+              <ol style={{ fontSize: 13, color: BRAND.ink, lineHeight: 1.7, paddingLeft: 18, margin: 0 }}>
+                <li>Open <b>Outlook</b> and start a new email.</li>
+                <li>Send it to <b style={{ userSelect: "all" }}>{SUPPORT_EMAIL}</b></li>
+                <li>Subject: <b style={{ userSelect: "all" }}>Eminent Central</b></li>
+                <li><b>Paste</b> (Ctrl+V) into the email — the details are already copied.</li>
+                <li>Send it.</li>
+              </ol>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -3228,1924 +3622,8 @@ function useNewVersionCheck() {
 }
 
 /* ============================ Module registry ============================ */
-/* ============================================================
-   ECG MEDICAID PENDING TRACKER — V3
-   Brand: Navy #142336, Gold #C4A997, Cream #F5F0E8
-   ============================================================ */
-
-const NAVY = BRAND.ink;
-const GOLD = '#C4A997';
-const CREAM = BRAND.paper;
-const INK = '#1a1a1a';
-const MUTED = BRAND.inkSoft;
-const RED = '#a3453a';
-
-const MP_STATE = { "Champion City": "PA", "Eden": "PA", "Aristos": "OH", "Alpine": "OH", "Aspen Glen": "OH", "The Pearl": "NY", "Highland Park": "NY" };
-const MP_FACILITIES = [];
-function mpSyncFacilities() {
-  MP_FACILITIES.length = 0;
-  FACILITIES.forEach((f) => { if (f.name !== "Atrium") MP_FACILITIES.push({ id: f.id, name: f.name, state: MP_STATE[f.name] || "PA", city: f.location || "" }); });
-}
-
-const IMPORTANCE = [
-  { id: 'high',   label: 'High',   color: '#a3453a', dot: '#a3453a' },
-  { id: 'medium', label: 'Medium', color: '#b8873a', dot: '#c99a4a' },
-  { id: 'low',    label: 'Low',    color: '#6b6357', dot: '#a8a196' },
-];
-
-const RETIREMENT_TYPE = 'Retirement account (IRA/401k)';
-
-const ASSET_TYPES = [
-  'Bank account (checking)', 'Bank account (savings)', 'CD / mpMoney market',
-  'Life insurance (whole)', 'Life insurance (term)', 'Burial account / plot',
-  'Real property (primary residence)', 'Real property (other)',
-  'Vehicle', RETIREMENT_TYPE, 'Stocks / bonds / brokerage',
-  'Annuity', 'Cash on hand', 'Other'
-];
-
-const INCOME_TYPES = [
-  'Social Security', 'SSI', 'SSD/SSDI', 'Pension', 'VA benefits',
-  'Retirement / IRA distribution', 'Annuity payment', 'Rental income',
-  'Interest / dividends', 'Wages', 'Other'
-];
-
-const RECEIPT_METHODS = [
-  'Direct deposit', 'Paper check', 'Cash', 'Prepaid card', 'Rep payee', 'Other'
-];
-
-const INCOME_COLLECTION_METHODS = [
-  { id: 'recurring_ach', label: 'Recurring ACH' },
-  { id: 'dd_rfms',       label: 'DD RFMS' },
-  { id: 'other',         label: 'Other (needs Corp BOM approval)' },
-];
-
-const FIN_STAGES = [
-  { id: 'not_started', label: 'Not started' },
-  { id: 'initiated',   label: 'Initiated screening' },
-  { id: 'completed',   label: 'Completed financial screening' },
-  { id: 'reviewed',    label: 'Financial review complete' },
-];
-
-const MEDICAID_APP_STATUSES = [
-  { id: 'not_submitted',    label: 'Not submitted',                           color: '#8a8378' },
-  { id: 'submitted',        label: 'Submitted',                               color: '#4a6fa5' },
-  { id: 'pending',          label: 'Pending with Medicaid',                   color: '#b8873a' },
-  { id: 'denied',           label: 'Denied',                                  color: '#a3453a' },
-  { id: 'approved',         label: 'Approved',                                color: '#4d7c4a' },
-  { id: 'approved_penalty', label: 'Approved with penalty',                   color: '#c47a3a' },
-  { id: 'approved_waiting', label: 'Approved — awaiting additional coverage', color: '#6b4a8a' },
-];
-const APPROVED_IDS = ['approved', 'approved_penalty', 'approved_waiting'];
-
-// Forms checklist (per user spec)
-const MEDICAID_FORMS = [
-  { id: 'consent',           label: 'Medicaid consent forms' },
-  { id: 'poa',               label: 'POA / Guardianship forms (when applicable)' },
-  { id: 'financial_release', label: 'Financial release' },
-  { id: 'loc',               label: 'LOC forms' },
-];
-
-// 2026 state regulations
-// PNA: PA $60 (eff 1/1/25), OH $75 (eff 10/1/25), NY $50
-const STATE_REGS = {
-  // PA individual limit is income-based: gross ≤ 300% FBR → $8,000 ($2,000 + $6,000 disregard); gross > 300% FBR → $2,400
-  PA: { individualLow: 2400, individualHigh: 8000, incomeThreshold: 2982, csraMin: 32532, csraMax: 162660, mmmnaMax: 4066.50, pna: 60 },
-  OH: { individual: 2000,  couple: 3000,  csraMin: 32532, csraMax: 162660, mmmnaMax: 4066.50, pna: 75, incomeLimit: 2982 },
-  // NY resource limits are COMPUTED from income, not stored: 150% of the annual income standard (138% FPL).
-  // 2026: annual $22,025 (≈$1,836/mo) → $33,038 individual · annual $29,864 (≈$2,489/mo) → $44,796 couple
-  NY: { incomeStandardAnnual: 22025, incomeStandardAnnualCouple: 29864, csraMin: 74820, csraMax: 162660, mmmnaMax: 4066.50, pna: 50 },
-};
-const PART_B_2026 = 202.90; // standard Medicare Part B premium 2026
-
-// RMD treatment applies in NY and OH: retirement accounts in payout status count as income
-const RMD_STATES = ['NY', 'OH'];
-
-const OH_FACILITY_IDS = MP_FACILITIES.filter(f => f.state === 'OH').map(f => f.id);
-const isOhio = (facId) => OH_FACILITY_IDS.includes(facId);
-const facilityState = (facId) => MP_FACILITIES.find(f => f.id === facId)?.state || 'PA';
-
-/* ---------- storage ---------- */
-
-
-
-
-
-/* ---------- helpers ---------- */
-const mpUid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const today = () => new Date().toISOString().slice(0, 10);
-const mpNum = (v) => {
-  const n = parseFloat(String(v || '').replace(/[^0-9.-]/g, ''));
-  return isNaN(n) ? 0 : n;
-};
-const mpMoney = (n) => `$${Math.round(n).toLocaleString()}`;
-const mpFmtDate = (iso) => {
-  if (!iso) return '';
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso));
-  return m ? `${m[2]}/${m[3]}/${m[1]}` : iso;
-};
-const caseDisplayName = (c) => {
-  const d = c?.demographics || {};
-  const n = `${d.firstName || ''} ${d.lastName || ''}`.trim();
-  return n || (c?.caseName && c.caseName !== 'New case' ? c.caseName : '') || 'New case';
-};
-const freqMult = (f) => f === 'monthly' ? 1 : f === 'weekly' ? 4.33 : f === 'bi-weekly' ? 2.17 : f === 'annual' ? 1 / 12 : 1;
-const rmdFreqMult = (f) => f === 'monthly' ? 1 : f === 'quarterly' ? 1 / 3 : 1 / 12; // default annual
-
-/* ---------- asset classification: 'countable' | 'exempt' | 'income' ----------
-   Exempt: term life · irrevocable burial · primary residence
-   Retirement (IRA/401k):
-     PA — always a countable asset for the resident, regardless of RMD.
-          Community spouse's retirement is EXEMPT per PA Medicaid regs
-          (only while the spouse is in the community, not institutionalized).
-     NY/OH — if an RMD is received, the account counts as INCOME (value excluded
-          from assets; RMD amount feeds gross monthly income). No RMD → countable asset. */
-const classifyAsset = (a, state, owner = 'resident', spouseInFacility = false) => {
-  if (a.type === 'Life insurance (term)') return 'exempt';
-  if (a.type === 'Burial account / plot') return a.irrevocable ? 'exempt' : 'countable';
-  if (a.type === 'Real property (primary residence)') return 'exempt';
-  if (a.type === RETIREMENT_TYPE) {
-    if (state === 'PA') {
-      if (owner === 'spouse' && !spouseInFacility) return 'exempt';
-      return 'countable';
-    }
-    if (RMD_STATES.includes(state) && a.rmdReceived === 'yes') return 'income';
-    return 'countable';
-  }
-  return 'countable';
-};
-
-const assetTotals = (list, state, owner = 'resident', spouseInFacility = false) => {
-  const t = { countable: 0, exempt: 0, income: 0 };
-  (list || []).forEach(a => { t[classifyAsset(a, state, owner, spouseInFacility)] += mpNum(a.value); });
-  return t;
-};
-
-// Monthly RMD income from retirement accounts classified as income
-const rmdMonthlyIncome = (list, state, owner = 'resident', spouseInFacility = false) =>
-  (list || [])
-    .filter(a => classifyAsset(a, state, owner, spouseInFacility) === 'income')
-    .reduce((s, a) => s + mpNum(a.rmdAmount) * rmdFreqMult(a.rmdFrequency), 0);
-
-// Gross monthly income = income sources + resident RMD income (NY/OH payout-status retirement)
-const grossMonthlyIncome = (c, state) =>
-  (c.incomeSources || []).reduce((s, x) => s + mpNum(x.amount) * freqMult(x.frequency || 'monthly'), 0)
-  + rmdMonthlyIncome(c.assets, state, 'resident');
-
-// Patient liability estimate. Spousal diversion is NOT estimated — it is determined by Medicaid.
-const patientLiabilityEstimate = (c, state) => {
-  const regs = STATE_REGS[state] || STATE_REGS.OH;
-  const gross = grossMonthlyIncome(c, state);
-  return Math.max(0, gross - regs.pna - PART_B_2026);
-};
-
-const qitRequired = (c, facId) =>
-  isOhio(facId) && grossMonthlyIncome(c, 'OH') > (STATE_REGS.OH.incomeLimit || Infinity);
-
-const qitHasContent = (c) => {
-  const q = c.qit || {};
-  return (q.established && q.established !== 'no') ||
-    !!(q.bankName || q.accountNumber || q.trustee || q.monthlyDeposit || q.effectiveDate || q.firstDepositDate || q.notes);
-};
-
-// NY resource limits are computed live from the income standards: 150% of the annual standard
-const nyDerivedLimit = (annualStd) => Math.round((annualStd || 0) * 1.5);
-const nyMonthlyStd = (annualStd) => Math.ceil((annualStd || 0) / 12);
-
-// PA individual resource limit is income-based: $8,000 if gross ≤ 300% FBR, $2,400 if above
-const paIndividualLimit = (grossMonthly, regs) =>
-  grossMonthly > regs.incomeThreshold ? regs.individualLow : regs.individualHigh;
-
-const computeSpendDown = (c, state) => {
-  const regs = STATE_REGS[state] || STATE_REGS.OH;
-  const isNY = state === 'NY';
-  const isPA = state === 'PA';
-  const married = c.demographics?.maritalStatus === 'married';
-  const spouseInFacility = c.spouse?.inFacility === 'yes';
-
-  const res = assetTotals(c.assets, state, 'resident');
-  const spList = c.spouseAssets || [];
-  const sp = married ? assetTotals(spList, state, 'spouse', spouseInFacility) : { countable: 0, exempt: 0, income: 0 };
-  // If spouse assets haven't been itemized yet, fall back to the rough total from demographics
-  const spouseCountable = married ? (spList.length > 0 ? sp.countable : mpNum(c.spouse?.assetsTotal)) : 0;
-
-  const counted = res.countable + spouseCountable;
-  const exempt = res.exempt + sp.exempt;
-  const incomeTreated = res.income + sp.income;
-  const gross = grossMonthlyIncome(c, state);
-  const spouseRmd = married ? rmdMonthlyIncome(spList, state, 'spouse', spouseInFacility) : 0;
-
-  // Individual limit per state:
-  //   NY — computed from income: 150% of the annual income standard
-  //   PA — income-based tier: gross ≤ 300% FBR ($2,982) → $8,000; above → $2,400
-  //   OH — flat $2,000 (income handled via QIT)
-  let indLimit, indBasis;
-  if (isNY) {
-    indLimit = nyDerivedLimit(regs.incomeStandardAnnual);
-    indBasis = `computed from income — 150% × annual NY income standard ${mpMoney(regs.incomeStandardAnnual)} ($${nyMonthlyStd(regs.incomeStandardAnnual).toLocaleString()}/mo) = ${mpMoney(indLimit)}`;
-  } else if (isPA) {
-    indLimit = paIndividualLimit(gross, regs);
-    indBasis = `income-based — gross ${mpMoney(gross)}/mo ${gross > regs.incomeThreshold ? 'above' : 'at/under'} 300% FBR (${mpMoney(regs.incomeThreshold)}) → ${mpMoney(indLimit)} limit`;
-  } else {
-    indLimit = regs.individual;
-    indBasis = `${state} individual limit`;
-  }
-
-  let assetLimit = indLimit;
-  let scenario = 'single';
-  let csra = 0;
-  let csraNote = '';
-  let limitBasis = indBasis;
-
-  if (married && spouseInFacility) {
-    scenario = 'married · spouse in facility';
-    if (isPA) {
-      const spouseGross = mpNum(c.spouse?.incomeMonthly);
-      const spouseLimit = paIndividualLimit(spouseGross, regs);
-      assetLimit = indLimit + spouseLimit;
-      limitBasis = `income-based per spouse — resident ${mpMoney(indLimit)} + spouse ${mpMoney(spouseLimit)} (each ${mpMoney(regs.individualHigh)} if gross ≤ ${mpMoney(regs.incomeThreshold)}, else ${mpMoney(regs.individualLow)})`;
-    } else if (isNY) {
-      assetLimit = nyDerivedLimit(regs.incomeStandardAnnualCouple);
-      limitBasis = `computed from income — 150% × annual NY couple income standard ${mpMoney(regs.incomeStandardAnnualCouple)} ($${nyMonthlyStd(regs.incomeStandardAnnualCouple).toLocaleString()}/mo) = ${mpMoney(assetLimit)}`;
-    } else {
-      assetLimit = regs.couple;
-      limitBasis = `${state} couple limit — both spouses institutionalized`;
-    }
-  } else if (married) {
-    // CSRA = half of the couple's combined countable assets, with state floor and cap
-    csra = Math.min(regs.csraMax, Math.max(regs.csraMin, counted / 2));
-    if (isNY) {
-      // NY: income-first — if community spouse income (incl. spouse RMD) + full diversion of
-      // resident income still falls short of the MMMNA, the CSRA rises to the maximum
-      const csIncome = mpNum(c.spouse?.incomeMonthly) + spouseRmd;
-      const shortfall = Math.max(0, regs.mmmnaMax - csIncome - gross);
-      if (shortfall > 0 && csra < regs.csraMax) {
-        csra = regs.csraMax;
-        csraNote = `Community spouse income falls ${mpMoney(shortfall)}/mo short of the MMMNA even after full diversion of resident income — CSRA raised to the maximum (enhanced CSRA).`;
-      }
-    }
-    assetLimit = indLimit + csra;
-    scenario = 'married · community spouse';
-    limitBasis = `${mpMoney(indLimit)} individual (${isNY ? 'income-derived' : isPA ? 'income-based' : state}) + CSRA ${mpMoney(csra)} (half of combined countable, floor ${mpMoney(regs.csraMin)}, cap ${mpMoney(regs.csraMax)})`;
-  }
-
-  const required = Math.max(0, counted - assetLimit);
-  const headroom = Math.max(0, assetLimit - counted);
-  return {
-    residentCountable: res.countable, spouseCountable, counted, exempt, incomeTreated,
-    spouseAssetsItemized: spList.length > 0, spouseRmd,
-    assetLimit, required, headroom, married, scenario, csra, csraNote, limitBasis
-  };
-};
-
-/* ---------- data model ---------- */
-const blankAsset = () => ({
-  id: mpUid(), type: '', institution: '', accountNumber: '', value: '', asOfDate: today(),
-  docRequested: false, docReceived: false, docReviewed: false,
-  revocable: false, irrevocable: false,
-  rmdReceived: '', rmdAmount: '', rmdFrequency: 'annual',
-  possibleGifting: false, giftingNotes: '', notes: ''
-});
-
-const blankCase = (facId, ownerName = '') => ({
-  id: mpUid(),
-  facilityId: facId,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  caseName: 'New case',
-  importance: 'medium',
-  closed: false,
-  closedDate: '',
-  demographics: {
-    firstName: '', lastName: '', dob: '', ssn: '', gender: '',
-    maritalStatus: 'single',
-    homeAddress: '', city: '', state: '', zip: '', countyOfResidence: '', phone: '',
-    admitDate: '', roomNumber: '', medicareId: '', medicaidId: '',
-    citizenship: '', primaryLanguage: '', bims: '',
-    notes: ''
-  },
-  spouse: {
-    firstName: '', lastName: '', dob: '', ssn: '', gender: '',
-    homeAddress: '', city: '', state: '', zip: '', countyOfResidence: '', phone: '',
-    livesWithResident: 'no', incomeMonthly: '', assetsTotal: '',
-    inFacility: 'no', notes: ''
-  },
-  tasks: {
-    familyComm:         { dueDate: '', owner: ownerName, flagged: false, completed: false, entries: [], notes: '' },
-    medicaidComm:       { dueDate: '', owner: ownerName, flagged: false, completed: false, entries: [], notes: '' },
-    incomeCollection:   { dueDate: '', owner: ownerName, flagged: false, completed: false, pointOfContact: '', sourceOfFunds: '', paymentMethod: '', paymentMethodNotes: '', notes: '' },
-    financialScreening: { dueDate: '', owner: ownerName, flagged: false, completed: false, stage: 'not_started', notes: '' },
-    consentForms:       { dueDate: '', owner: ownerName, flagged: false, completed: false, checked: {}, notes: '' },
-    householdBills:     { dueDate: '', owner: ownerName, flagged: false, completed: false, notes: '' },
-    custom: []
-  },
-  assets: [],
-  spouseAssets: [],
-  incomeSources: [],
-  income: { estimatedPatientLiabilityOverride: '', notes: '' },
-  spendDown: { notes: '' },
-  medicaidApplication: {
-    status: 'not_submitted',
-    submissionDate: '',
-    medicaidEffectiveDate: '',
-    approvalDate: '',
-    eligibilityEffectiveDate: '',
-    appealSubmissionDate: '',
-    hearingDate: '',
-    caseworker: { name: '', email: '', phone: '', fax: '' },
-    notes: ''
-  },
-  qit: { established: 'no', effectiveDate: '', bankName: '', accountNumber: '', monthlyDeposit: '', trustee: '', firstDepositDate: '', notes: '' }
-});
-
-/* ============================================================
-   PRIMITIVE UI
-   ============================================================ */
-
-const Btn = ({ children, onClick, variant = 'primary', size = 'md', className = '', ...p }) => {
-  const base = 'inline-flex items-center gap-2 rounded-md font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed';
-  const sizes = { sm: 'px-3 py-1.5 text-sm', md: 'px-4 py-2 text-sm', lg: 'px-5 py-2.5 text-base' };
-  const variants = {
-    primary: 'text-white hover:opacity-90 shadow-sm',
-    secondary: 'border hover:bg-black/[0.03]',
-    ghost: 'hover:bg-black/[0.05]',
-    danger: 'text-white hover:opacity-90 shadow-sm bg-red-800',
-  };
-  const style = variant === 'primary' ? { backgroundColor: NAVY }
-    : variant === 'secondary' ? { borderColor: '#00000018', color: NAVY }
-    : {};
-  return (
-    <button onClick={onClick} className={`${base} ${sizes[size]} ${variants[variant]} ${className}`} style={style} {...p}>
-      {children}
-    </button>
-  );
-};
-
-const MpField = ({ label, children, hint, required, className = '' }) => (
-  <label className={`block ${className}`}>
-    <div className="text-[11px] font-medium tracking-wide uppercase mb-1 flex items-center gap-1" style={{ color: MUTED }}>
-      {label}{required && <span style={{ color: RED }}>*</span>}
-    </div>
-    {children}
-    {hint && <div className="text-xs mt-1" style={{ color: MUTED }}>{hint}</div>}
-  </label>
-);
-
-const inputCls = 'w-full px-3 py-2 rounded-md border bg-white text-sm outline-none focus:ring-2 transition';
-const inputStyle = { borderColor: '#00000015', color: INK };
-
-const TextInput = (p) => <input {...p} className={`${inputCls} ${p.className || ''}`} style={inputStyle} />;
-const TextArea = ({ rows = 3, ...p }) => <textarea rows={rows} {...p} className={`${inputCls} ${p.className || ''}`} style={inputStyle} />;
-const Select = ({ children, ...p }) => <select {...p} className={`${inputCls} pr-8 ${p.className || ''}`} style={inputStyle}>{children}</select>;
-
-const MpPill = ({ children, color = '#8a8378', filled = false }) => (
-  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium"
-    style={filled ? { backgroundColor: color, color: 'white' } : { backgroundColor: `${color}18`, color, border: `1px solid ${color}30` }}>
-    {children}
-  </span>
-);
-
-const SectionCard = ({ title, right, children, className = '', accent = false }) => (
-  <div className={`rounded-lg border bg-white ${className}`} style={{ borderColor: '#00000012' }}>
-    {title && (
-      <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: '#00000010', backgroundColor: accent ? `${GOLD}10` : 'transparent' }}>
-        <div className="font-medium" style={{ color: NAVY, fontFamily: 'Georgia, "Playfair Display", serif' }}>{title}</div>
-        <div>{right}</div>
-      </div>
-    )}
-    <div className="p-4">{children}</div>
-  </div>
-);
-
-const MpEmpty = ({ icon: MpIcon, title, hint, action }) => (
-  <div className="text-center py-10 px-4">
-    {MpIcon && <MpIcon className="mx-auto mb-3 opacity-30" size={32} style={{ color: NAVY }} />}
-    <div className="font-medium mb-1" style={{ color: NAVY }}>{title}</div>
-    {hint && <div className="text-sm" style={{ color: MUTED }}>{hint}</div>}
-    {action && <div className="mt-4">{action}</div>}
-  </div>
-);
-
-const Wordmark = ({ size = 'md' }) => {
-  const sizes = { sm: { title: 'text-lg', sub: 'text-[10px]' }, md: { title: 'text-2xl', sub: 'text-xs' }, lg: { title: 'text-4xl', sub: 'text-sm' } };
-  const s = sizes[size];
-  return (
-    <div className="inline-flex flex-col items-start leading-none">
-      <div className="tracking-[0.2em]" style={{ color: GOLD, fontSize: '10px' }}>◆ ECG ◆</div>
-      <div className={`${s.title} font-normal mt-1`} style={{ color: NAVY, fontFamily: 'Georgia, "Playfair Display", serif' }}>Eminent Care</div>
-      <div className={`${s.sub} tracking-widest uppercase mt-1`} style={{ color: MUTED }}>Medicaid Pending Tracker</div>
-    </div>
-  );
-};
-
-const Stat = ({ label, value, sub, color = NAVY }) => (
-  <div>
-    <div className="text-[11px] uppercase tracking-wide" style={{ color: MUTED }}>{label}</div>
-    <div className="text-2xl" style={{ color, fontFamily: 'Georgia, serif' }}>{value}</div>
-    {sub && <div className="text-xs" style={{ color: MUTED }}>{sub}</div>}
-  </div>
-);
-
-const Checkbox = ({ checked, onChange, label }) => (
-  <label className="flex items-center gap-2 py-1 cursor-pointer">
-    <input type="checkbox" checked={!!checked} onChange={e => onChange(e.target.checked)} />
-    <span className="text-sm" style={{ color: INK }}>{label}</span>
-  </label>
-);
-
-const Row = ({ k, v }) => (
-  <div className="flex items-baseline gap-2 py-1 border-b last:border-b-0" style={{ borderColor: '#00000008' }}>
-    <div className="text-xs uppercase tracking-wide w-32 shrink-0" style={{ color: MUTED }}>{k}</div>
-    <div className="text-sm" style={{ color: INK }}>{v}</div>
-  </div>
-);
-
-/* ============================================================
-   LOGIN
-   ============================================================ */
-
-function FacilityView({ facilityId, session, cases, loading, onCreateCase, onBack, onOpenCase, onLogout }) {
-  const facility = MP_FACILITIES.find(f => f.id === facilityId);
-  const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [importanceFilter, setImportanceFilter] = useState('all');
-
-  const createCase = async () => {
-    const id = await onCreateCase();
-    if (id) onOpenCase(id);
-  };
-
-  const activeCases = useMemo(() => cases.filter(c => !c.closed), [cases]);
-  const closedCases = useMemo(() => cases.filter(c => c.closed), [cases]);
-
-  const filtered = useMemo(() => {
-    return activeCases.filter(c => {
-      const st = c.medicaidApplication?.status || 'not_submitted';
-      if (query && !caseDisplayName(c).toLowerCase().includes(query.toLowerCase())) return false;
-      if (statusFilter !== 'all' && st !== statusFilter) return false;
-      if (importanceFilter !== 'all' && c.importance !== importanceFilter) return false;
-      return true;
-    });
-  }, [activeCases, query, statusFilter, importanceFilter]);
-
-  return (
-    <div className="min-h-screen" style={{ backgroundColor: CREAM }}>
-      <div className="border-b bg-white sticky top-0 z-10" style={{ borderColor: '#00000010' }}>
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            {session.role === 'admin' && (
-              <Btn variant="ghost" size="sm" onClick={onBack}><ChevronLeft size={14} />All</Btn>
-            )}
-            <div className="min-w-0">
-              <div className="text-[10px] uppercase tracking-widest" style={{ color: GOLD }}>{facility.state} · {facility.city}</div>
-              <div className="font-medium truncate" style={{ color: NAVY, fontFamily: 'Georgia, serif' }}>{facility.name}</div>
-            </div>
-          </div>
-          <Btn variant="ghost" size="sm" onClick={onLogout}><LogOut size={14} /></Btn>
-        </div>
-      </div>
-
-      <div className="max-w-6xl mx-auto px-4 py-6">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
-          <h1 className="text-2xl" style={{ color: NAVY, fontFamily: 'Georgia, "Playfair Display", serif' }}>
-            Pending cases <span style={{ color: MUTED }}>({activeCases.length})</span>
-          </h1>
-          <Btn onClick={createCase}><Plus size={16} />New case</Btn>
-        </div>
-
-        <div className="rounded-lg border bg-white overflow-hidden" style={{ borderColor: '#00000012' }}>
-          <div className="p-3 flex flex-col md:flex-row gap-2 border-b" style={{ borderColor: '#00000010', backgroundColor: '#fafaf7' }}>
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-2.5 opacity-40" size={16} />
-              <input className="w-full pl-9 pr-3 py-2 rounded-md border bg-white text-sm" style={inputStyle}
-                placeholder="Search by resident name" value={query} onChange={e => setQuery(e.target.value)} />
-            </div>
-            <Select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-              <option value="all">All statuses</option>
-              {MEDICAID_APP_STATUSES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-            </Select>
-            <Select value={importanceFilter} onChange={e => setImportanceFilter(e.target.value)}>
-              <option value="all">All priorities</option>
-              {IMPORTANCE.map(i => <option key={i.id} value={i.id}>{i.label}</option>)}
-            </Select>
-          </div>
-
-          {loading ? (
-            <div className="p-8 text-center text-sm" style={{ color: MUTED }}>Loading…</div>
-          ) : filtered.length === 0 ? (
-            <MpEmpty icon={ClipboardList}
-              title={activeCases.length === 0 ? 'No pending cases yet' : 'No cases match filters'}
-              hint={activeCases.length === 0 ? 'Tap "New case" to add the first resident.' : 'Try clearing the filters above.'}
-              action={activeCases.length === 0 && <Btn onClick={createCase}><Plus size={14} />Add first case</Btn>}
-            />
-          ) : (
-            <div className="divide-y" style={{ borderColor: '#00000008' }}>
-              {filtered.map(c => {
-                const stId = c.medicaidApplication?.status || 'not_submitted';
-                const s = MEDICAID_APP_STATUSES.find(x => x.id === stId) || MEDICAID_APP_STATUSES[0];
-                const imp = IMPORTANCE.find(x => x.id === c.importance) || IMPORTANCE[1];
-                const flags = countFlags(c);
-                return (
-                  <button key={c.id} onClick={() => onOpenCase(c.id)}
-                    className="w-full text-left hover:bg-black/[0.02] transition-colors">
-                    <div className="px-4 py-3 flex items-center gap-3">
-                      <div className="w-1 self-stretch rounded" style={{ backgroundColor: imp.dot, minHeight: 40 }} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="font-medium truncate" style={{ color: NAVY }}>{caseDisplayName(c)}</div>
-                          <MpPill color={s.color}>{s.label}</MpPill>
-                          {c.importance === 'high' && <MpPill color="#a3453a" filled><AlertCircle size={10} />High</MpPill>}
-                          {flags > 0 && <MpPill color="#c47a3a"><Flag size={10} />{flags} flagged</MpPill>}
-                        </div>
-                        <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: MUTED }}>
-                          {c.medicaidApplication?.submissionDate && <span>Submitted: {mpFmtDate(c.medicaidApplication.submissionDate)}</span>}
-                          {c.medicaidApplication?.medicaidEffectiveDate && <span>Effective: {mpFmtDate(c.medicaidApplication.medicaidEffectiveDate)}</span>}
-                        </div>
-                      </div>
-                      <ChevronRight size={16} className="opacity-40" />
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {!loading && closedCases.length > 0 && (
-          <div className="mt-6">
-            <div className="text-[11px] uppercase tracking-widest mb-2 pb-1 border-b flex items-center gap-2" style={{ color: MUTED, borderColor: '#00000015' }}>
-              <Archive size={12} />Closed / inactive cases ({closedCases.length})
-            </div>
-            <div className="rounded-lg border bg-white overflow-hidden divide-y" style={{ borderColor: '#00000012' }}>
-              {closedCases.map(c => {
-                const stId = c.medicaidApplication?.status || 'not_submitted';
-                const s = MEDICAID_APP_STATUSES.find(x => x.id === stId) || MEDICAID_APP_STATUSES[0];
-                return (
-                  <button key={c.id} onClick={() => onOpenCase(c.id)}
-                    className="w-full text-left hover:bg-black/[0.02] transition-colors opacity-75 hover:opacity-100">
-                    <div className="px-4 py-3 flex items-center gap-3">
-                      <Archive size={16} className="shrink-0" style={{ color: MUTED }} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="font-medium truncate" style={{ color: NAVY }}>{caseDisplayName(c)}</div>
-                          <MpPill color="#8a8378">Closed {mpFmtDate(c.closedDate)}</MpPill>
-                          <MpPill color={s.color}>{s.label}</MpPill>
-                        </div>
-                      </div>
-                      <ChevronRight size={16} className="opacity-40" />
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-const countFlags = (c) => {
-  let n = 0;
-  const t = c.tasks || {};
-  ['familyComm', 'medicaidComm', 'incomeCollection', 'financialScreening', 'consentForms', 'householdBills'].forEach(k => {
-    if (t[k]?.flagged) n++;
-  });
-  n += (t.custom || []).filter(x => x.flagged).length;
-  return n;
-};
-
-/* ============================================================
-   CASE DETAIL — frozen header + tabs
-   ============================================================ */
-
-function CaseDetail({ facilityId, caseId, session, caseData, onUpdateCase, onDeleteCase, onBack, onLogout }) {
-  const facility = MP_FACILITIES.find(f => f.id === facilityId);
-  const [tab, setTab] = useState('overview');
-  const [savedAt, setSavedAt] = useState(null);
-
-  const c = caseData;
-  const state = facility?.state;
-
-  const showQIT = c ? (qitRequired(c, facilityId) || (isOhio(facilityId) && qitHasContent(c))) : false;
-
-  useEffect(() => {
-    if (tab === 'qit' && !showQIT) setTab('overview');
-  }, [tab, showQIT]);
-
-  const save = useCallback(async (patch) => {
-    if (!c) return;
-    await onUpdateCase(caseId, patch);
-    setSavedAt(new Date());
-  }, [c, caseId, onUpdateCase]);
-
-  const updateField = (path, value) => {
-    if (!c) return;
-    const parts = path.split('.');
-    if (parts.length === 1) save({ [parts[0]]: value });
-    else if (parts.length === 2) save({ [parts[0]]: { ...c[parts[0]], [parts[1]]: value } });
-    else if (parts.length === 3) save({ [parts[0]]: { ...c[parts[0]], [parts[1]]: { ...(c[parts[0]]?.[parts[1]] || {}), [parts[2]]: value } } });
-  };
-
-  const deleteCase = async () => {
-    if (!confirm('Delete this case permanently?')) return;
-    await onDeleteCase(caseId);
-    onBack();
-  };
-
-  if (!c) return (
-    <div className="min-h-screen flex flex-col items-center justify-center text-sm gap-4" style={{ backgroundColor: CREAM, color: MUTED }}>
-      <div>Case not found.</div>
-      <Btn variant="secondary" onClick={onBack}><ChevronLeft size={14} />Back to list</Btn>
-    </div>
-  );
-
-  const d = c.demographics || {};
-  const medStatus = MEDICAID_APP_STATUSES.find(s => s.id === (c.medicaidApplication?.status || 'not_submitted')) || MEDICAID_APP_STATUSES[0];
-  const imp = IMPORTANCE.find(i => i.id === c.importance) || IMPORTANCE[1];
-
-  const tabs = [
-    { id: 'overview', label: 'Overview',             icon: Home },
-    { id: 'demo',     label: 'Demographics',         icon: User },
-    { id: 'medapp',   label: 'Medicaid Application', icon: FileText },
-    { id: 'tasks',    label: 'Tasks',                icon: ClipboardList },
-    { id: 'assets',   label: 'Assets & Spend-down',  icon: Landmark },
-    { id: 'income',   label: 'Income',               icon: DollarSign },
-    ...(showQIT ? [{ id: 'qit', label: 'QIT', icon: ShieldCheck }] : []),
-  ];
-
-  return (
-    <div className="min-h-screen" style={{ backgroundColor: CREAM }}>
-      {/* Frozen header: name, DOB, SSN, marital status pinned above the tabs */}
-      <div className="border-b bg-white sticky top-0 z-20" style={{ borderColor: '#00000010' }}>
-        <div className="max-w-6xl mx-auto px-4 py-2.5">
-          <div className="flex items-center justify-between gap-3">
-            <Btn variant="ghost" size="sm" onClick={onBack}><ChevronLeft size={14} />{facility.name}</Btn>
-            <div className="flex items-center gap-2 text-xs" style={{ color: MUTED }}>
-              {savedAt && <><Check size={12} />Saved</>}
-              <Btn variant="ghost" size="sm" onClick={onLogout}><LogOut size={14} /></Btn>
-            </div>
-          </div>
-          <div className="mt-1 flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: imp.dot }} />
-            <div className="text-xl flex-1 min-w-0 truncate"
-              style={{ color: NAVY, fontFamily: 'Georgia, "Playfair Display", serif' }}>
-              {caseDisplayName(c)}
-            </div>
-            <select value={c.importance} onChange={e => updateField('importance', e.target.value)}
-              className="text-xs border rounded px-1.5 py-1 bg-white" style={{ borderColor: '#00000015', color: imp.color }}>
-              {IMPORTANCE.map(i => <option key={i.id} value={i.id}>{i.label}</option>)}
-            </select>
-          </div>
-          <div className="mt-1 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs" style={{ color: MUTED }}>
-            <span><b style={{ color: NAVY }}>DOB</b> {mpFmtDate(d.dob) || '—'}</span>
-            <span><b style={{ color: NAVY }}>SSN</b> {d.ssn || '—'}</span>
-            <span><b style={{ color: NAVY }}>Marital</b> {d.maritalStatus || '—'}</span>
-            {c.closed && <MpPill color="#8a8378" filled><Archive size={10} />Closed {mpFmtDate(c.closedDate)}</MpPill>}
-            <MpPill color={medStatus.color}>{medStatus.label}</MpPill>
-            {showQIT && <MpPill color="#4a6fa5"><ShieldCheck size={10} />QIT</MpPill>}
-          </div>
-        </div>
-
-        <div className="max-w-6xl mx-auto px-2 md:px-4 overflow-x-auto">
-          <div className="flex gap-0.5 min-w-max">
-            {tabs.map(t => {
-              const MpIcon = t.icon;
-              const active = tab === t.id;
-              return (
-                <button key={t.id} onClick={() => setTab(t.id)}
-                  className={`flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${active ? '' : 'hover:bg-black/[0.03]'}`}
-                  style={{ color: active ? NAVY : MUTED, borderColor: active ? NAVY : 'transparent' }}>
-                  <MpIcon size={14} />{t.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div className="max-w-6xl mx-auto px-4 py-6 space-y-4">
-        {tab === 'overview' && <OverviewTab c={c} state={state} deleteCase={deleteCase} setTab={setTab} showQIT={showQIT} updateField={updateField} />}
-        {tab === 'demo'     && <DemographicsTab c={c} updateField={updateField} />}
-        {tab === 'medapp'   && <MedicaidApplicationTab c={c} updateField={updateField} />}
-        {tab === 'tasks'    && <TasksTab c={c} save={save} updateField={updateField} session={session} />}
-        {tab === 'assets'   && <AssetsTab c={c} save={save} updateField={updateField} state={state} />}
-        {tab === 'income'   && <IncomeTab c={c} save={save} updateField={updateField} state={state} facilityId={facilityId} />}
-        {tab === 'qit' && showQIT && <QITTab c={c} updateField={updateField} />}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   OVERVIEW — dashboard across sections
-   ============================================================ */
-
-function OverviewTab({ c, state, deleteCase, setTab, showQIT, updateField }) {
-  const sd = computeSpendDown(c, state);
-  const grossIncome = grossMonthlyIncome(c, state);
-  const patientLiab = mpNum(c.income?.estimatedPatientLiabilityOverride) || patientLiabilityEstimate(c, state);
-  const married = sd.married;
-
-  const t = c.tasks || {};
-  const preTasks = ['familyComm', 'medicaidComm', 'incomeCollection', 'financialScreening', 'consentForms', ...(married ? ['householdBills'] : [])];
-  const flaggedCount = preTasks.filter(k => t[k]?.flagged).length + (t.custom || []).filter(x => x.flagged).length;
-  const openTasks = preTasks.filter(k => !t[k]?.completed).length + (t.custom || []).filter(x => !x.completed).length;
-  const doneTasks = preTasks.filter(k => t[k]?.completed).length + (t.custom || []).filter(x => x.completed).length;
-
-  const medApp = c.medicaidApplication || {};
-  const medStatus = MEDICAID_APP_STATUSES.find(s => s.id === medApp.status) || MEDICAID_APP_STATUSES[0];
-  const isApproved = APPROVED_IDS.includes(medApp.status);
-
-  const reviewedAssets = c.assets.filter(a => a.docReviewed).length;
-  const incomeVerified = c.incomeSources.filter(i => i.verified).length;
-  const possibleGiftingCount = [...c.assets, ...(c.spouseAssets || [])].filter(a => a.possibleGifting).length;
-
-  const consentDone = Object.values(t.consentForms?.checked || {}).filter(Boolean).length;
-
-  const d = c.demographics || {};
-  const fullName = `${d.firstName || ''} ${d.lastName || ''}`.trim() || 'No name entered';
-  const payMethod = INCOME_COLLECTION_METHODS.find(m => m.id === t.incomeCollection?.paymentMethod)?.label;
-
-  const toggleClosed = () => {
-    if (c.closed) updateField && updateField('closed', false);
-    else {
-      updateField && updateField('closedDate', today());
-      updateField && updateField('closed', true);
-    }
-  };
-
-  return (
-    <>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <SectionCard title="Resident snapshot">
-          <div className="space-y-2 text-sm">
-            <Row k="Name"           v={fullName} />
-            <Row k="DOB"            v={mpFmtDate(d.dob) || '—'} />
-            <Row k="SSN"            v={d.ssn || '—'} />
-            <Row k="Admit date"     v={mpFmtDate(d.admitDate) || '—'} />
-            <Row k="Room"           v={d.roomNumber || '—'} />
-            <Row k="Marital status" v={d.maritalStatus || '—'} />
-            <Row k="County"         v={d.countyOfResidence || '—'} />
-            <Row k="BIMS"           v={d.bims || '—'} />
-            <Row k="Medicare ID"    v={d.medicareId || '—'} />
-            <Row k="Medicaid ID"    v={d.medicaidId || '—'} />
-          </div>
-          <div className="mt-3 pt-3 border-t" style={{ borderColor: '#00000010' }}>
-            <Btn variant="secondary" size="sm" onClick={() => setTab('demo')}>Edit demographics<ChevronRight size={14} /></Btn>
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Medicaid application">
-          <div className="mb-3"><MpPill color={medStatus.color} filled>{medStatus.label}</MpPill></div>
-          <div className="space-y-2 text-sm">
-            <Row k="Submitted"       v={mpFmtDate(medApp.submissionDate) || '—'} />
-            <Row k="Effective date"  v={mpFmtDate(medApp.medicaidEffectiveDate) || '—'} />
-            {isApproved && (
-              <>
-                <Row k="Approved on"           v={mpFmtDate(medApp.approvalDate) || <span style={{ color: RED }}>Required</span>} />
-                <Row k="Eligibility effective" v={mpFmtDate(medApp.eligibilityEffectiveDate) || '—'} />
-              </>
-            )}
-            {medApp.status === 'denied' && (
-              <>
-                <Row k="Appeal submitted" v={mpFmtDate(medApp.appealSubmissionDate) || <span style={{ color: RED }}>Required</span>} />
-                <Row k="Hearing date"     v={mpFmtDate(medApp.hearingDate) || '—'} />
-              </>
-            )}
-            <Row k="Caseworker" v={medApp.caseworker?.name || '—'} />
-          </div>
-          <div className="mt-3 pt-3 border-t" style={{ borderColor: '#00000010' }}>
-            <Btn variant="secondary" size="sm" onClick={() => setTab('medapp')}>Edit application<ChevronRight size={14} /></Btn>
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Financial snapshot" accent>
-          <div className="grid grid-cols-2 gap-3">
-            <Stat label="Countable assets" value={mpMoney(sd.counted)} sub={`${mpMoney(sd.exempt)} exempt${sd.incomeTreated > 0 ? ` · ${mpMoney(sd.incomeTreated)} treated as income` : ''} · ${reviewedAssets}/${c.assets.length} reviewed`} />
-            <Stat label="Required spend-down" value={mpMoney(sd.required)} sub={sd.required > 0 ? `${state} · ${sd.scenario}` : 'At/under limit'} color={sd.required > 0 ? RED : '#4d7c4a'} />
-            <Stat label="Gross monthly income" value={mpMoney(grossIncome)} sub={`${incomeVerified}/${c.incomeSources.length} verified`} />
-            <Stat label="Est. patient liability" value={mpMoney(patientLiab)} sub={married ? 'before spousal diversion (per Medicaid)' : 'monthly'} />
-          </div>
-          {payMethod && (
-            <div className="mt-3 text-xs" style={{ color: MUTED }}>Payment to facility: <b style={{ color: NAVY }}>{payMethod}</b></div>
-          )}
-          {possibleGiftingCount > 0 && (
-            <div className="mt-3 p-2 rounded-md text-xs flex items-center gap-2" style={{ backgroundColor: '#c47a3a15', color: '#8a5a2a' }}>
-              <AlertCircle size={14} />{possibleGiftingCount} asset{possibleGiftingCount > 1 ? 's' : ''} flagged as possible gifting — review look-back
-            </div>
-          )}
-          {showQIT && (
-            <div className="mt-3 p-2 rounded-md text-xs flex items-center gap-2" style={{ backgroundColor: '#4a6fa515', color: '#3a5a85' }}>
-              <ShieldCheck size={14} />Income exceeds Ohio limit — QIT required
-            </div>
-          )}
-          <div className="mt-3 pt-3 border-t flex gap-2" style={{ borderColor: '#00000010' }}>
-            <Btn variant="secondary" size="sm" onClick={() => setTab('assets')}>Assets<ChevronRight size={14} /></Btn>
-            <Btn variant="secondary" size="sm" onClick={() => setTab('income')}>Income<ChevronRight size={14} /></Btn>
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Tasks">
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            <Stat label="Open" value={openTasks} />
-            <Stat label="Done" value={doneTasks} color="#4d7c4a" />
-            <Stat label="Flagged" value={flaggedCount} color={flaggedCount > 0 ? '#c47a3a' : NAVY} />
-          </div>
-          <div className="space-y-1.5 text-sm">
-            <MiniTask label="Family communication"   task={t.familyComm} />
-            <MiniTask label="Medicaid communication" task={t.medicaidComm} />
-            <MiniTask label="Income collection"      task={t.incomeCollection} extra={payMethod} />
-            <MiniTask label="Financial screening"    task={t.financialScreening} extra={FIN_STAGES.find(s => s.id === t.financialScreening?.stage)?.label} />
-            <MiniTask label="Medicaid forms"         task={t.consentForms} extra={`${consentDone}/${MEDICAID_FORMS.length}`} />
-            {married && <MiniTask label="Household bills from spouse" task={t.householdBills} />}
-          </div>
-          <div className="mt-3 pt-3 border-t" style={{ borderColor: '#00000010' }}>
-            <Btn variant="secondary" size="sm" onClick={() => setTab('tasks')}>Open tasks<ChevronRight size={14} /></Btn>
-          </div>
-        </SectionCard>
-      </div>
-
-      <SectionCard title="Case actions">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="text-sm" style={{ color: MUTED }}>
-            {c.closed
-              ? <>This case is closed (since {mpFmtDate(c.closedDate) || '—'}). It stays on file in the Closed / inactive section and can be reopened any time.</>
-              : <>Closing keeps the full file in a Closed / inactive section — nothing is lost and it can be reopened. Deleting is permanent.</>}
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <Btn variant="secondary" size="sm" onClick={toggleClosed}>
-              <Archive size={14} />{c.closed ? 'Reopen case' : 'Close case'}
-            </Btn>
-            <Btn variant="danger" size="sm" onClick={deleteCase}><Trash2 size={14} />Delete</Btn>
-          </div>
-        </div>
-      </SectionCard>
-    </>
-  );
-}
-
-const MiniTask = ({ label, task, extra }) => {
-  const t = task || {};
-  return (
-    <div className="flex items-center justify-between gap-2 py-1">
-      <div className="flex items-center gap-2 min-w-0">
-        {t.completed ? <Check size={14} style={{ color: '#4d7c4a' }} /> : <CircleDot size={14} style={{ color: MUTED }} />}
-        <span className={`text-sm truncate ${t.completed ? 'line-through opacity-60' : ''}`} style={{ color: INK }}>{label}</span>
-        {t.flagged && <Flag size={12} style={{ color: '#c47a3a' }} />}
-      </div>
-      <div className="text-xs text-right" style={{ color: MUTED }}>
-        {extra && <span>{extra}</span>}
-        {t.dueDate && <span className="ml-2">Due {mpFmtDate(t.dueDate)}</span>}
-      </div>
-    </div>
-  );
-};
-
-/* ============================================================
-   DEMOGRAPHICS
-   ============================================================ */
-
-const REQUIRED_DEMO_FIELDS = [
-  { key: 'firstName', label: 'First name' },
-  { key: 'lastName',  label: 'Last name' },
-  { key: 'dob',       label: 'Date of birth' },
-  { key: 'ssn',       label: 'SSN' },
-  { key: 'maritalStatus', label: 'Marital status' },
-];
-
-function DemographicsTab({ c, updateField }) {
-  const d = c.demographics;
-  const married = d.maritalStatus === 'married';
-  const missing = REQUIRED_DEMO_FIELDS.filter(f => !String(d[f.key] || '').trim());
-  return (
-    <>
-      <SectionCard title="Resident demographics">
-        {missing.length > 0 && (
-          <div className="mb-4 p-3 rounded-md text-sm flex items-center gap-2" style={{ backgroundColor: `${RED}12`, color: RED }}>
-            <AlertCircle size={14} className="shrink-0" />
-            Required fields missing: {missing.map(f => f.label).join(', ')}
-          </div>
-        )}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <MpField label="First name" required><TextInput value={d.firstName} onChange={e => updateField('demographics.firstName', e.target.value)} /></MpField>
-          <MpField label="Last name" required><TextInput value={d.lastName} onChange={e => updateField('demographics.lastName', e.target.value)} /></MpField>
-          <MpField label="Date of birth" required><TextInput type="date" value={d.dob} onChange={e => updateField('demographics.dob', e.target.value)} /></MpField>
-          <MpField label="SSN" required><TextInput value={d.ssn} onChange={e => updateField('demographics.ssn', e.target.value)} placeholder="xxx-xx-xxxx" /></MpField>
-          <MpField label="Gender">
-            <Select value={d.gender} onChange={e => updateField('demographics.gender', e.target.value)}>
-              <option value="">Select</option><option>Female</option><option>Male</option><option>Other</option>
-            </Select>
-          </MpField>
-          <MpField label="Marital status" required>
-            <Select value={d.maritalStatus} onChange={e => updateField('demographics.maritalStatus', e.target.value)}>
-              <option value="single">Single</option>
-              <option value="married">Married</option>
-              <option value="widowed">Widowed</option>
-              <option value="divorced">Divorced</option>
-              <option value="separated">Separated</option>
-            </Select>
-          </MpField>
-          <MpField label="Home address" className="md:col-span-2">
-            <TextInput value={d.homeAddress} onChange={e => updateField('demographics.homeAddress', e.target.value)} placeholder="Street address before admission" />
-          </MpField>
-          <MpField label="City"><TextInput value={d.city} onChange={e => updateField('demographics.city', e.target.value)} /></MpField>
-          <div className="grid grid-cols-2 gap-3">
-            <MpField label="State"><TextInput value={d.state} onChange={e => updateField('demographics.state', e.target.value)} maxLength={2} /></MpField>
-            <MpField label="ZIP"><TextInput value={d.zip} onChange={e => updateField('demographics.zip', e.target.value)} /></MpField>
-          </div>
-          <MpField label="County of residence" hint="Determines local Medicaid office">
-            <TextInput value={d.countyOfResidence} onChange={e => updateField('demographics.countyOfResidence', e.target.value)} placeholder="e.g. Allegheny" />
-          </MpField>
-          <MpField label="Phone"><TextInput value={d.phone} onChange={e => updateField('demographics.phone', e.target.value)} /></MpField>
-          <MpField label="Admission date"><TextInput type="date" value={d.admitDate} onChange={e => updateField('demographics.admitDate', e.target.value)} /></MpField>
-          <MpField label="Room #"><TextInput value={d.roomNumber} onChange={e => updateField('demographics.roomNumber', e.target.value)} /></MpField>
-          <MpField label="BIMS score" hint="Brief Interview for Mental Status (0–15)">
-            <TextInput value={d.bims} onChange={e => updateField('demographics.bims', e.target.value)} placeholder="0–15" />
-          </MpField>
-          <MpField label="Medicare ID"><TextInput value={d.medicareId} onChange={e => updateField('demographics.medicareId', e.target.value)} /></MpField>
-          <MpField label="Medicaid ID"><TextInput value={d.medicaidId} onChange={e => updateField('demographics.medicaidId', e.target.value)} /></MpField>
-          <MpField label="Citizenship"><TextInput value={d.citizenship} onChange={e => updateField('demographics.citizenship', e.target.value)} placeholder="US Citizen / LPR / Other" /></MpField>
-          <MpField label="Primary language"><TextInput value={d.primaryLanguage} onChange={e => updateField('demographics.primaryLanguage', e.target.value)} /></MpField>
-        </div>
-        <div className="mt-4">
-          <MpField label="Notes"><TextArea value={d.notes} onChange={e => updateField('demographics.notes', e.target.value)} /></MpField>
-        </div>
-      </SectionCard>
-
-      {married && <SpouseSection c={c} updateField={updateField} />}
-    </>
-  );
-}
-
-function SpouseSection({ c, updateField }) {
-  const s = c.spouse;
-  return (
-    <SectionCard title="Community spouse demographics" right={<MpPill color={GOLD}>Auto-shown because resident is married</MpPill>}>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <MpField label="First name"><TextInput value={s.firstName} onChange={e => updateField('spouse.firstName', e.target.value)} /></MpField>
-        <MpField label="Last name"><TextInput value={s.lastName} onChange={e => updateField('spouse.lastName', e.target.value)} /></MpField>
-        <MpField label="Date of birth"><TextInput type="date" value={s.dob} onChange={e => updateField('spouse.dob', e.target.value)} /></MpField>
-        <MpField label="SSN"><TextInput value={s.ssn} onChange={e => updateField('spouse.ssn', e.target.value)} placeholder="xxx-xx-xxxx" /></MpField>
-        <MpField label="Gender">
-          <Select value={s.gender} onChange={e => updateField('spouse.gender', e.target.value)}>
-            <option value="">Select</option><option>Female</option><option>Male</option><option>Other</option>
-          </Select>
-        </MpField>
-        <MpField label="Phone"><TextInput value={s.phone} onChange={e => updateField('spouse.phone', e.target.value)} /></MpField>
-        <MpField label="Home address" className="md:col-span-2">
-          <TextInput value={s.homeAddress} onChange={e => updateField('spouse.homeAddress', e.target.value)} />
-        </MpField>
-        <MpField label="City"><TextInput value={s.city} onChange={e => updateField('spouse.city', e.target.value)} /></MpField>
-        <div className="grid grid-cols-2 gap-3">
-          <MpField label="State"><TextInput value={s.state} onChange={e => updateField('spouse.state', e.target.value)} maxLength={2} /></MpField>
-          <MpField label="ZIP"><TextInput value={s.zip} onChange={e => updateField('spouse.zip', e.target.value)} /></MpField>
-        </div>
-        <MpField label="County of residence"><TextInput value={s.countyOfResidence} onChange={e => updateField('spouse.countyOfResidence', e.target.value)} /></MpField>
-        <MpField label="Currently in a facility?" hint="Drives the asset limit — community spouse adds CSRA; both in facility uses the couple limit">
-          <Select value={s.inFacility} onChange={e => updateField('spouse.inFacility', e.target.value)}>
-            <option value="no">No — community spouse</option>
-            <option value="yes">Yes — institutionalized</option>
-          </Select>
-        </MpField>
-        <MpField label="Lives with resident (pre-admission)?">
-          <Select value={s.livesWithResident} onChange={e => updateField('spouse.livesWithResident', e.target.value)}>
-            <option value="yes">Yes</option><option value="no">No</option>
-          </Select>
-        </MpField>
-        <MpField label="Spouse monthly income" hint="Used for NY enhanced-CSRA check and PA per-spouse limit tier">
-          <TextInput value={s.incomeMonthly} onChange={e => updateField('spouse.incomeMonthly', e.target.value)} placeholder="$" />
-        </MpField>
-        <MpField label="Spouse assets (rough total)" hint="Used only until spouse assets are itemized in the Assets tab">
-          <TextInput value={s.assetsTotal} onChange={e => updateField('spouse.assetsTotal', e.target.value)} placeholder="$" />
-        </MpField>
-      </div>
-      <div className="mt-4">
-        <MpField label="Spouse notes"><TextArea value={s.notes} onChange={e => updateField('spouse.notes', e.target.value)} /></MpField>
-      </div>
-    </SectionCard>
-  );
-}
-
-/* ============================================================
-   MEDICAID APPLICATION
-   ============================================================ */
-
-function MedicaidApplicationTab({ c, updateField }) {
-  const m = c.medicaidApplication || {};
-  const status = MEDICAID_APP_STATUSES.find(s => s.id === m.status) || MEDICAID_APP_STATUSES[0];
-  const isApproved = APPROVED_IDS.includes(m.status);
-  const isDenied = m.status === 'denied';
-
-  // Auto-flip: approved + approval date differs from effective date -> approved_waiting
-  useEffect(() => {
-    if (m.status === 'approved' && m.approvalDate && m.medicaidEffectiveDate && m.approvalDate !== m.medicaidEffectiveDate) {
-      updateField('medicaidApplication.status', 'approved_waiting');
-    }
-  }, [m.status, m.approvalDate, m.medicaidEffectiveDate]);
-
-  return (
-    <>
-      <SectionCard title="Application status" right={<MpPill color={status.color} filled>{status.label}</MpPill>}>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <MpField label="Status" required>
-            <Select value={m.status} onChange={e => updateField('medicaidApplication.status', e.target.value)}>
-              {MEDICAID_APP_STATUSES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-            </Select>
-          </MpField>
-          <MpField label="Application submission date">
-            <TextInput type="date" value={m.submissionDate} onChange={e => updateField('medicaidApplication.submissionDate', e.target.value)} />
-          </MpField>
-          <MpField label="Medicaid effective date" hint="Date coverage begins">
-            <TextInput type="date" value={m.medicaidEffectiveDate} onChange={e => updateField('medicaidApplication.medicaidEffectiveDate', e.target.value)} />
-          </MpField>
-          {isApproved && (
-            <>
-              <MpField label="Date of approval" required hint="Auto-flips status if it differs from effective date">
-                <TextInput type="date" value={m.approvalDate} onChange={e => updateField('medicaidApplication.approvalDate', e.target.value)} />
-              </MpField>
-              <MpField label="Eligibility effective date">
-                <TextInput type="date" value={m.eligibilityEffectiveDate} onChange={e => updateField('medicaidApplication.eligibilityEffectiveDate', e.target.value)} />
-              </MpField>
-            </>
-          )}
-        </div>
-        {isApproved && m.approvalDate && m.medicaidEffectiveDate && m.approvalDate !== m.medicaidEffectiveDate && (
-          <div className="mt-3 p-3 rounded-md text-sm flex items-center gap-2" style={{ backgroundColor: '#6b4a8a15', color: '#6b4a8a' }}>
-            <AlertCircle size={14} />
-            Approval date ({mpFmtDate(m.approvalDate)}) doesn't match effective date ({mpFmtDate(m.medicaidEffectiveDate)}) — status set to <b>Approved — awaiting additional coverage</b>.
-          </div>
-        )}
-        {isDenied && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 pt-4 border-t" style={{ borderColor: '#00000010' }}>
-            <MpField label="Appeal submission date" required>
-              <TextInput type="date" value={m.appealSubmissionDate} onChange={e => updateField('medicaidApplication.appealSubmissionDate', e.target.value)} />
-            </MpField>
-            <MpField label="Hearing date">
-              <TextInput type="date" value={m.hearingDate} onChange={e => updateField('medicaidApplication.hearingDate', e.target.value)} />
-            </MpField>
-          </div>
-        )}
-        {isDenied && !m.appealSubmissionDate && (
-          <div className="mt-3 p-3 rounded-md text-sm flex items-center gap-2" style={{ backgroundColor: `${RED}15`, color: RED }}>
-            <AlertCircle size={14} />Case denied — appeal submission date is required.
-          </div>
-        )}
-      </SectionCard>
-
-      <SectionCard title="Medicaid caseworker">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <MpField label="Name"><TextInput value={m.caseworker?.name || ''} onChange={e => updateField('medicaidApplication.caseworker', { ...m.caseworker, name: e.target.value })} /></MpField>
-          <MpField label="Email"><TextInput type="email" value={m.caseworker?.email || ''} onChange={e => updateField('medicaidApplication.caseworker', { ...m.caseworker, email: e.target.value })} placeholder="name@county.gov" /></MpField>
-          <MpField label="Phone"><TextInput value={m.caseworker?.phone || ''} onChange={e => updateField('medicaidApplication.caseworker', { ...m.caseworker, phone: e.target.value })} /></MpField>
-          <MpField label="Fax"><TextInput value={m.caseworker?.fax || ''} onChange={e => updateField('medicaidApplication.caseworker', { ...m.caseworker, fax: e.target.value })} /></MpField>
-        </div>
-        <div className="mt-4">
-          <MpField label="Application notes"><TextArea value={m.notes} onChange={e => updateField('medicaidApplication.notes', e.target.value)} /></MpField>
-        </div>
-      </SectionCard>
-    </>
-  );
-}
-
-/* ============================================================
-   TASKS
-   ============================================================ */
-
-function TaskCard({ task, taskKey, title, updateField, children }) {
-  const [open, setOpen] = useState(false);
-  const t = task || {};
-  return (
-    <div className={`rounded-lg border transition-all ${t.flagged ? 'ring-1' : ''} ${t.completed ? 'opacity-70' : ''}`}
-      style={{ borderColor: t.flagged ? '#c47a3a' : '#00000012', backgroundColor: 'white', '--tw-ring-color': t.flagged ? '#c47a3a44' : 'transparent' }}>
-      <div className="px-4 py-3 flex items-center gap-3">
-        <input type="checkbox" checked={!!t.completed}
-          onChange={e => updateField(`tasks.${taskKey}.completed`, e.target.checked)}
-          onClick={e => e.stopPropagation()} />
-        <button onClick={() => setOpen(!open)} className="flex-1 flex items-center gap-2 min-w-0 text-left">
-          <div className={`font-medium truncate ${t.completed ? 'line-through' : ''}`} style={{ color: NAVY, fontFamily: 'Georgia, serif' }}>{title}</div>
-          {t.flagged && <Flag size={14} style={{ color: '#c47a3a' }} />}
-          {t.dueDate && <span className="text-xs" style={{ color: MUTED }}>· due {mpFmtDate(t.dueDate)}</span>}
-          {t.owner && <span className="text-xs" style={{ color: MUTED }}>· {t.owner}</span>}
-        </button>
-        <button onClick={() => updateField(`tasks.${taskKey}.flagged`, !t.flagged)}
-          className="p-1.5 rounded hover:bg-black/[0.05]" title="Flag task">
-          <Flag size={14} style={{ color: t.flagged ? '#c47a3a' : MUTED }} />
-        </button>
-        <button onClick={() => setOpen(!open)} className="p-1"><ChevronDown size={14} className={`opacity-40 transition-transform ${open ? 'rotate-180' : ''}`} /></button>
-      </div>
-      {open && (
-        <div className="border-t px-4 py-4 space-y-4" style={{ borderColor: '#00000010', backgroundColor: '#fafaf7' }}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <MpField label="Due date"><TextInput type="date" value={t.dueDate || ''} onChange={e => updateField(`tasks.${taskKey}.dueDate`, e.target.value)} /></MpField>
-            <MpField label="Owner" hint="Defaults to the user who created the case — change as needed">
-              <TextInput value={t.owner || ''} onChange={e => updateField(`tasks.${taskKey}.owner`, e.target.value)} placeholder="Name" />
-            </MpField>
-          </div>
-          {children}
-          <MpField label="Task notes"><TextArea value={t.notes || ''} onChange={e => updateField(`tasks.${taskKey}.notes`, e.target.value)} /></MpField>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TasksTab({ c, save, updateField, session }) {
-  const t = c.tasks || {};
-  const married = c.demographics?.maritalStatus === 'married';
-
-  const defs = [
-    { key: 'familyComm', title: 'Communication with family',
-      body: <CommEntries taskKey="familyComm" c={c} save={save} whoLabel="Family member spoken to" whoHint="Name & relationship (e.g. Jane Doe — daughter)" /> },
-    { key: 'medicaidComm', title: 'Communication with Medicaid',
-      body: <CommEntries taskKey="medicaidComm" c={c} save={save} whoLabel="Caseworker / agency contact" whoHint="Name & office (e.g. M. Rivera — Allegheny CAO)" /> },
-    { key: 'incomeCollection', title: 'Income collection',
-      body: <IncomeCollectionBody t={t} updateField={updateField} /> },
-    { key: 'financialScreening', title: 'Financial screening',
-      body: (
-        <MpField label="Stage">
-          <Select value={t.financialScreening?.stage || 'not_started'}
-            onChange={e => updateField('tasks.financialScreening.stage', e.target.value)}>
-            {FIN_STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </Select>
-        </MpField>
-      ) },
-    { key: 'consentForms', title: 'Medicaid forms',
-      body: <MedicaidFormsChecklist c={c} save={save} /> },
-    ...(married ? [{
-      key: 'householdBills', title: 'Household bills from spouse',
-      body: (
-        <div className="text-sm px-3 py-2 rounded-md" style={{ backgroundColor: 'white', color: MUTED, border: '1px solid #00000010' }}>
-          Request the community spouse's household bills — rent/mortgage, property taxes, utilities, homeowner's insurance, condo fees. These support the spousal allowance determination made by Medicaid.
-        </div>
-      )
-    }] : []),
-  ];
-
-  const openDefs = defs.filter(d => !t[d.key]?.completed);
-  const doneDefs = defs.filter(d => t[d.key]?.completed);
-  const customList = t.custom || [];
-  const openCustom = customList.filter(x => !x.completed);
-  const doneCustom = customList.filter(x => x.completed);
-
-  return (
-    <div className="space-y-3">
-      {openDefs.map(d => (
-        <TaskCard key={d.key} task={t[d.key]} taskKey={d.key} title={d.title} updateField={updateField}>{d.body}</TaskCard>
-      ))}
-
-      <CustomTasks c={c} save={save} tasks={openCustom} allTasks={customList} session={session} />
-
-      {(doneDefs.length > 0 || doneCustom.length > 0) && (
-        <div className="mt-8">
-          <div className="text-[11px] uppercase tracking-widest mb-2 pb-1 border-b flex items-center gap-2" style={{ color: '#4d7c4a', borderColor: '#4d7c4a30' }}>
-            <Check size={12} />Completed ({doneDefs.length + doneCustom.length})
-          </div>
-          <div className="space-y-2">
-            {doneDefs.map(d => (
-              <TaskCard key={d.key} task={t[d.key]} taskKey={d.key} title={d.title} updateField={updateField}>{d.body}</TaskCard>
-            ))}
-            {doneCustom.map(x => (
-              <CustomTaskRow key={x.id} t={x} c={c} save={save} allTasks={customList} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function IncomeCollectionBody({ t, updateField }) {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      <MpField label="Point of contact" hint="Who's handling this (family, POA, rep payee…)">
-        <TextInput value={t.incomeCollection?.pointOfContact || ''}
-          onChange={e => updateField('tasks.incomeCollection.pointOfContact', e.target.value)}
-          placeholder="Name & relationship" />
-      </MpField>
-      <MpField label="Source of funds" hint="Where the payment comes from">
-        <TextInput value={t.incomeCollection?.sourceOfFunds || ''}
-          onChange={e => updateField('tasks.incomeCollection.sourceOfFunds', e.target.value)}
-          placeholder="e.g. SS + pension pool, joint acct" />
-      </MpField>
-      <MpField label="Method of payment to facility" hint="Shows in Income summary once selected">
-        <Select value={t.incomeCollection?.paymentMethod || ''}
-          onChange={e => updateField('tasks.incomeCollection.paymentMethod', e.target.value)}>
-          <option value="">Select…</option>
-          {INCOME_COLLECTION_METHODS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-        </Select>
-      </MpField>
-      {t.incomeCollection?.paymentMethod === 'other' && (
-        <MpField label="Other method — approval status" hint="Corp BOM approval required">
-          <TextInput value={t.incomeCollection?.paymentMethodNotes || ''}
-            onChange={e => updateField('tasks.incomeCollection.paymentMethodNotes', e.target.value)}
-            placeholder="Approval status & detail" />
-        </MpField>
-      )}
-    </div>
-  );
-}
-
-function CommEntries({ taskKey, c, save, whoLabel, whoHint }) {
-  const entries = c.tasks?.[taskKey]?.entries || [];
-  const add = () => {
-    const entry = { id: mpUid(), date: today(), contact: '', method: 'phone', notes: '' };
-    save({ tasks: { ...c.tasks, [taskKey]: { ...c.tasks[taskKey], entries: [entry, ...entries] } } });
-  };
-  const update = (id, patch) => {
-    save({ tasks: { ...c.tasks, [taskKey]: { ...c.tasks[taskKey], entries: entries.map(e => e.id === id ? { ...e, ...patch } : e) } } });
-  };
-  const remove = (id) => {
-    save({ tasks: { ...c.tasks, [taskKey]: { ...c.tasks[taskKey], entries: entries.filter(e => e.id !== id) } } });
-  };
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-sm font-medium" style={{ color: NAVY }}>Conversation log <span className="opacity-50">({entries.length})</span></div>
-        <Btn size="sm" onClick={add}><Plus size={14} />Log entry</Btn>
-      </div>
-      {entries.length === 0 ? (
-        <div className="text-xs px-3 py-4 rounded-md text-center" style={{ color: MUTED, backgroundColor: 'white' }}>No entries yet. Log every call, email, or in-person conversation.</div>
-      ) : (
-        <div className="space-y-3">
-          {entries.map(e => (
-            <div key={e.id} className="rounded-md border p-3" style={{ borderColor: '#00000012', backgroundColor: 'white' }}>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-2">
-                <MpField label="Date"><TextInput type="date" value={e.date} onChange={ev => update(e.id, { date: ev.target.value })} /></MpField>
-                <MpField label={whoLabel} className="md:col-span-2"><TextInput value={e.contact} onChange={ev => update(e.id, { contact: ev.target.value })} placeholder={whoHint} /></MpField>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-2">
-                <MpField label="Method">
-                  <Select value={e.method} onChange={ev => update(e.id, { method: ev.target.value })}>
-                    <option value="phone">Phone</option>
-                    <option value="email">Email</option>
-                    <option value="in-person">In person</option>
-                    <option value="fax">Fax</option>
-                    <option value="portal">State portal</option>
-                    <option value="mail">Mail</option>
-                  </Select>
-                </MpField>
-              </div>
-              <MpField label="Notes"><TextArea rows={3} value={e.notes} onChange={ev => update(e.id, { notes: ev.target.value })} placeholder="What was discussed, what was requested, next steps…" /></MpField>
-              <div className="flex justify-end mt-2">
-                <Btn variant="ghost" size="sm" onClick={() => remove(e.id)}><Trash2 size={14} /></Btn>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MedicaidFormsChecklist({ c, save }) {
-  const checked = c.tasks?.consentForms?.checked || {};
-  const toggle = (id, val) => {
-    save({ tasks: { ...c.tasks, consentForms: { ...c.tasks.consentForms, checked: { ...checked, [id]: val } } } });
-  };
-  return (
-    <div>
-      <div className="text-[11px] uppercase tracking-wide mb-2" style={{ color: MUTED }}>Forms</div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
-        {MEDICAID_FORMS.map(f => (
-          <Checkbox key={f.id} checked={checked[f.id]} onChange={v => toggle(f.id, v)} label={f.label} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function CustomTaskRow({ t, c, save, allTasks }) {
-  const update = (id, patch) => save({ tasks: { ...c.tasks, custom: allTasks.map(x => x.id === id ? { ...x, ...patch } : x) } });
-  const remove = (id) => save({ tasks: { ...c.tasks, custom: allTasks.filter(x => x.id !== id) } });
-  return (
-    <div className={`rounded-md border p-3 ${t.flagged ? 'ring-1' : ''} ${t.completed ? 'opacity-60' : ''}`}
-      style={{ borderColor: t.flagged ? '#c47a3a' : '#00000012', backgroundColor: 'white', '--tw-ring-color': t.flagged ? '#c47a3a44' : 'transparent' }}>
-      <div className="flex items-start gap-3">
-        <input type="checkbox" checked={!!t.completed} onChange={e => update(t.id, { completed: e.target.checked })} className="mt-1" />
-        <div className="flex-1 min-w-0">
-          <input value={t.title} onChange={e => update(t.id, { title: e.target.value })}
-            className={`w-full bg-transparent outline-none text-sm font-medium ${t.completed ? 'line-through' : ''}`}
-            style={{ color: NAVY }} />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2">
-            <TextInput type="date" value={t.dueDate} onChange={e => update(t.id, { dueDate: e.target.value })} />
-            <TextInput value={t.owner} onChange={e => update(t.id, { owner: e.target.value })} placeholder="Owner" />
-            <div className="flex items-center gap-2">
-              <button onClick={() => update(t.id, { flagged: !t.flagged })}
-                className="px-2 py-1 rounded text-xs flex items-center gap-1 border" style={{ borderColor: '#00000015', color: t.flagged ? '#c47a3a' : MUTED }}>
-                <Flag size={12} />{t.flagged ? 'Flagged' : 'Flag'}
-              </button>
-              <button onClick={() => remove(t.id)} className="ml-auto opacity-40 hover:opacity-100"><Trash2 size={14} /></button>
-            </div>
-          </div>
-          <div className="mt-2">
-            <MpField label="Notes">
-              <TextArea rows={2} value={t.notes || ''} onChange={e => update(t.id, { notes: e.target.value })} placeholder="Task notes" />
-            </MpField>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CustomTasks({ c, save, tasks, allTasks, session }) {
-  const [newT, setNewT] = useState('');
-  const defaultOwner = session?.userName || (session?.role === 'admin' ? 'Corporate' : (MP_FACILITIES.find(f => f.id === session?.facilityId)?.name || ''));
-
-  const add = () => {
-    if (!newT.trim()) return;
-    const t = { id: mpUid(), title: newT.trim(), notes: '', dueDate: '', owner: defaultOwner, flagged: false, completed: false, createdAt: new Date().toISOString() };
-    save({ tasks: { ...c.tasks, custom: [...allTasks, t] } });
-    setNewT('');
-  };
-
-  return (
-    <div className="mt-6">
-      <div className="text-[11px] uppercase tracking-widest mb-2 pb-1 border-b" style={{ color: GOLD, borderColor: `${GOLD}30` }}>Custom tasks</div>
-      <div className="flex gap-2 mb-3">
-        <TextInput value={newT} onChange={e => setNewT(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && add()}
-          placeholder="Add a custom task (e.g. request 60-mo PNC statements)" />
-        <Btn onClick={add} disabled={!newT.trim()}><Plus size={16} /></Btn>
-      </div>
-      {tasks.length === 0 ? (
-        <div className="text-xs px-3 py-4 rounded-md text-center" style={{ color: MUTED, backgroundColor: 'white', border: '1px dashed #00000015' }}>Custom tasks appear here.</div>
-      ) : (
-        <div className="space-y-2">
-          {tasks.map(t => <CustomTaskRow key={t.id} t={t} c={c} save={save} allTasks={allTasks} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================
-   ASSETS + SPEND-DOWN
-   ============================================================ */
-
-function AssetsTab({ c, save, updateField, state }) {
-  const sd = computeSpendDown(c, state);
-  const regs = STATE_REGS[state] || STATE_REGS.OH;
-  const gross = grossMonthlyIncome(c, state);
-  const liab = mpNum(c.income?.estimatedPatientLiabilityOverride) || patientLiabilityEstimate(c, state);
-  const married = sd.married;
-  const spouseInFacility = c.spouse?.inFacility === 'yes';
-
-  const allAssets = [...c.assets, ...(married ? (c.spouseAssets || []) : [])];
-  const exemptTypesEntered = [...new Set(
-    [...c.assets.map(a => ({ a, owner: 'resident' })), ...(married ? (c.spouseAssets || []).map(a => ({ a, owner: 'spouse' })) : [])]
-      .filter(({ a, owner }) => a.type && classifyAsset(a, state, owner, spouseInFacility) === 'exempt')
-      .map(({ a, owner }) => {
-        if (a.type === 'Life insurance (term)') return 'term life';
-        if (a.type === 'Burial account / plot') return 'irrevocable burial';
-        if (a.type === 'Real property (primary residence)') return 'primary residence';
-        if (a.type === RETIREMENT_TYPE) return 'spouse retirement (PA)';
-        return a.type.toLowerCase();
-      })
-  )];
-
-  const addTo = (listKey) => {
-    save({ [listKey]: [...(c[listKey] || []), blankAsset()] });
-  };
-  const updateIn = (listKey) => (id, patch) => save({ [listKey]: (c[listKey] || []).map(a => a.id === id ? { ...a, ...patch } : a) });
-  const removeIn = (listKey) => (id) => save({ [listKey]: (c[listKey] || []).filter(a => a.id !== id) });
-
-  const reviewedCount = allAssets.filter(a => a.docReviewed).length;
-  const giftingCount = allAssets.filter(a => a.possibleGifting).length;
-
-  const renderList = (list, listKey, owner) => (
-    (list || []).length === 0
-      ? <MpEmpty icon={Landmark} title={owner === 'spouse' ? "No spouse assets logged yet" : "No assets logged yet"}
-          hint="Add each asset separately. Classification (countable / exempt / income) is automatic."
-          action={<Btn onClick={() => addTo(listKey)}><Plus size={14} />Add asset</Btn>} />
-      : <div className="space-y-3">
-          {(list || []).map((a, i) => (
-            <AssetRow key={a.id} a={a} n={i + 1} state={state} owner={owner} spouseInFacility={spouseInFacility}
-              update={(p) => updateIn(listKey)(a.id, p)} remove={() => removeIn(listKey)(a.id)} />
-          ))}
-        </div>
-  );
-
-  return (
-    <>
-      <SectionCard title="Spend-down calculator" accent
-        right={<div className="text-xs" style={{ color: MUTED }}>{state} · {sd.scenario}</div>}>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
-          <Stat label="Total assets (countable)" value={mpMoney(sd.counted)}
-            sub={married
-              ? (sd.spouseAssetsItemized ? `resident ${mpMoney(sd.residentCountable)} + spouse ${mpMoney(sd.spouseCountable)}` : `incl. spouse rough total ${mpMoney(sd.spouseCountable)}`)
-              : `${c.assets.length} asset${c.assets.length === 1 ? '' : 's'} entered`} />
-          <Stat label="Exempt assets" value={mpMoney(sd.exempt)} sub={exemptTypesEntered.length ? exemptTypesEntered.join(' · ') : 'none entered'} />
-          <Stat label="Required spend-down" value={mpMoney(sd.required)} color={sd.required > 0 ? RED : '#4d7c4a'} sub={sd.required > 0 ? 'Above limit' : 'At/under limit'} />
-        </div>
-        {sd.incomeTreated > 0 && (
-          <div className="text-xs px-3 py-2 rounded-md mb-2 font-medium" style={{ backgroundColor: `${RED}10`, color: RED }}>
-            {mpMoney(sd.incomeTreated)} in retirement accounts is counted towards INCOME (RMD in payout status) — excluded from the asset totals above.
-          </div>
-        )}
-        <div className="text-xs px-3 py-2 rounded-md mb-2" style={{ backgroundColor: '#00000006', color: MUTED }}>
-          Asset limit <b style={{ color: NAVY }}>{mpMoney(sd.assetLimit)}</b> = {sd.limitBasis}
-        </div>
-        {sd.csraNote && (
-          <div className="text-xs px-3 py-2 rounded-md mb-2 flex items-center gap-2" style={{ backgroundColor: '#4a6fa515', color: '#3a5a85' }}>
-            <AlertCircle size={14} className="shrink-0" />{sd.csraNote}
-          </div>
-        )}
-        {state === 'PA' && (
-          <div className="text-xs px-3 py-2 rounded-md mb-2" style={{ backgroundColor: '#4a6fa50c', color: '#3a5a85' }}>
-            <b>PA — income sets the asset limit:</b> gross income at/under {mpMoney(regs.incomeThreshold)}/mo (300% FBR) → {mpMoney(regs.individualHigh)} limit ($2,000 + $6,000 disregard); above {mpMoney(regs.incomeThreshold)} → {mpMoney(regs.individualLow)}. This resident's gross is {mpMoney(gross)}/mo → {mpMoney(gross > regs.incomeThreshold ? regs.individualLow : regs.individualHigh)} tier. Entering or updating income sources changes this limit automatically.
-          </div>
-        )}
-        {state === 'NY' && (
-          <div className="text-xs px-3 py-2 rounded-md mb-2" style={{ backgroundColor: '#4a6fa50c', color: '#3a5a85' }}>
-            <b>NY — income sets the asset limit:</b> the resource limit is computed live as 150% of the annual income standard —
-            {' '}${nyMonthlyStd(regs.incomeStandardAnnual).toLocaleString()}/mo ({mpMoney(regs.incomeStandardAnnual)}/yr) → {mpMoney(nyDerivedLimit(regs.incomeStandardAnnual))} individual · ${nyMonthlyStd(regs.incomeStandardAnnualCouple).toLocaleString()}/mo → {mpMoney(nyDerivedLimit(regs.incomeStandardAnnualCouple))} couple. Change the income standard in the regs and the limit recalculates.
-            {liab > 0 && sd.headroom > 0 && (
-              <> Income also erodes eligibility while pending: with {mpMoney(liab)}/mo of income owed to care, uncollected income accumulates as a countable resource — remaining headroom {mpMoney(sd.headroom)} ÷ {mpMoney(liab)}/mo ≈ <b>{Math.floor(sd.headroom / liab)} month{Math.floor(sd.headroom / liab) === 1 ? '' : 's'}</b> before the resident exceeds the limit if the NAMI isn't collected monthly.</>
-            )}
-            {liab > 0 && sd.headroom === 0 && sd.required > 0 && (
-              <> Resident is already over the limit — every uncollected month of income adds {mpMoney(liab)} to the required spend-down.</>
-            )}
-          </div>
-        )}
-        <div className="text-xs px-3 py-2 rounded-md mb-3" style={{ backgroundColor: '#00000006', color: MUTED }}>
-          Monthly income spend-down (est. patient liability): <b style={{ color: NAVY }}>{mpMoney(liab)}</b> — gross {mpMoney(gross)} − NF PNA ${regs.pna} ({state}) − Part B ${PART_B_2026}{married ? ' · spousal diversion determined by Medicaid' : ''}
-        </div>
-        <MpField label="Spend-down plan / notes">
-          <TextArea value={c.spendDown?.notes || ''} onChange={e => updateField('spendDown.notes', e.target.value)} placeholder="How the spend-down will be executed — burial contracts, home equity, spousal transfer, etc." />
-        </MpField>
-      </SectionCard>
-
-      <SectionCard title={married ? "Resident's assets" : "Assets"} right={
-        <div className="flex items-center gap-3">
-          <div className="text-xs" style={{ color: MUTED }}>{reviewedCount}/{allAssets.length} reviewed {giftingCount > 0 && <span style={{ color: '#c47a3a' }}>· {giftingCount} gifting flag</span>}</div>
-          <Btn size="sm" onClick={() => addTo('assets')}><Plus size={14} />Add asset</Btn>
-        </div>
-      }>
-        {renderList(c.assets, 'assets', 'resident')}
-      </SectionCard>
-
-      {married && (
-        <SectionCard title="Spouse's assets" right={
-          <div className="flex items-center gap-3">
-            {state === 'PA' && !spouseInFacility && <MpPill color="#4d7c4a">PA: spouse IRA/401k exempt</MpPill>}
-            <Btn size="sm" onClick={() => addTo('spouseAssets')}><Plus size={14} />Add asset</Btn>
-          </div>
-        }>
-          {!sd.spouseAssetsItemized && mpNum(c.spouse?.assetsTotal) > 0 && (
-            <div className="text-xs px-3 py-2 rounded-md mb-3" style={{ backgroundColor: `${GOLD}12`, color: '#8a6a3a' }}>
-              Currently using the rough spouse total ({mpMoney(mpNum(c.spouse.assetsTotal))}) from Demographics. Itemize assets here and the calculator switches to the itemized list.
-            </div>
-          )}
-          {renderList(c.spouseAssets, 'spouseAssets', 'spouse')}
-        </SectionCard>
-      )}
-    </>
-  );
-}
-
-function AssetRow({ a, n, state, owner, spouseInFacility, update, remove }) {
-  const [open, setOpen] = useState(!a.type);
-  const cls = classifyAsset(a, state, owner, spouseInFacility);
-  const isBurial = a.type === 'Burial account / plot';
-  const isRetirement = a.type === RETIREMENT_TYPE;
-  const rmdApplies = isRetirement && RMD_STATES.includes(state) && !(owner === 'spouse' && state === 'PA');
-  const rmdMissing = rmdApplies && !a.rmdReceived;
-  const clsPill = cls === 'income'
-    ? <MpPill color={RED} filled>Counted as income</MpPill>
-    : cls === 'exempt'
-      ? <MpPill color="#4d7c4a">Exempt</MpPill>
-      : <MpPill color="#4a6fa5">Countable</MpPill>;
-
-  return (
-    <div className="rounded-md border" style={{
-      borderColor: rmdMissing ? RED : a.possibleGifting ? '#c47a3a' : a.docReviewed ? '#4d7c4a55' : '#00000012',
-      backgroundColor: a.possibleGifting ? '#c47a3a08' : a.docReviewed ? '#4d7c4a08' : '#fafaf7'
-    }}>
-      <button onClick={() => setOpen(!open)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left">
-        <div className="text-xs font-mono opacity-40" style={{ color: NAVY }}>{String(n).padStart(2, '0')}</div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium truncate" style={{ color: NAVY }}>
-            {a.type || 'New asset — choose type'}
-            {a.institution && <span className="font-normal opacity-70"> · {a.institution}</span>}
-          </div>
-          <div className="text-xs" style={{ color: MUTED }}>
-            {a.value && <>${mpNum(a.value).toLocaleString()}</>}
-            {a.value && a.asOfDate && ' · '}
-            {a.asOfDate && `as of ${mpFmtDate(a.asOfDate)}`}
-          </div>
-        </div>
-        {rmdMissing && <MpPill color={RED} filled><AlertCircle size={10} />RMD?</MpPill>}
-        {a.type && clsPill}
-        {a.possibleGifting && <MpPill color="#c47a3a"><AlertCircle size={10} />Gifting?</MpPill>}
-        {a.docReviewed && <MpPill color="#4d7c4a"><Check size={10} />Reviewed</MpPill>}
-        <ChevronRight size={14} className={`opacity-40 transition-transform ${open ? 'rotate-90' : ''}`} />
-      </button>
-      {open && (
-        <div className="border-t px-3 pt-3 pb-3 space-y-3" style={{ borderColor: '#00000010' }}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <MpField label="Asset type">
-              <Select value={a.type} onChange={e => update({ type: e.target.value })}>
-                <option value="">Select type…</option>
-                {ASSET_TYPES.map(t => <option key={t}>{t}</option>)}
-              </Select>
-            </MpField>
-            <MpField label="Institution / holder"><TextInput value={a.institution} onChange={e => update({ institution: e.target.value })} placeholder="e.g. PNC Bank, MetLife" /></MpField>
-            <MpField label="Account # / policy # (last 4)"><TextInput value={a.accountNumber} onChange={e => update({ accountNumber: e.target.value })} placeholder="****1234" /></MpField>
-            <MpField label="Value / balance"><TextInput value={a.value} onChange={e => update({ value: e.target.value })} placeholder="$" /></MpField>
-            <MpField label="As-of date"><TextInput type="date" value={a.asOfDate} onChange={e => update({ asOfDate: e.target.value })} /></MpField>
-          </div>
-
-          {isBurial && (
-            <div className="p-3 rounded-md border" style={{ borderColor: '#C4A99750', backgroundColor: '#C4A9970c' }}>
-              <div className="text-[11px] uppercase tracking-wide mb-1" style={{ color: MUTED }}>Burial classification</div>
-              <div className="flex gap-6">
-                <Checkbox checked={a.revocable} onChange={v => update({ revocable: v, irrevocable: v ? false : a.irrevocable })} label="Revocable (countable)" />
-                <Checkbox checked={a.irrevocable} onChange={v => update({ irrevocable: v, revocable: v ? false : a.revocable })} label="Irrevocable (exempt)" />
-              </div>
-            </div>
-          )}
-
-          {rmdApplies && (
-            <div className="p-3 rounded-md border" style={{ borderColor: rmdMissing ? RED : '#4a6fa540', backgroundColor: rmdMissing ? `${RED}08` : '#4a6fa508' }}>
-              <div className="text-[11px] uppercase tracking-wide mb-1 flex items-center gap-1" style={{ color: rmdMissing ? RED : MUTED }}>
-                RMD received?<span style={{ color: RED }}>*</span>
-              </div>
-              <div className="flex gap-6">
-                <Checkbox checked={a.rmdReceived === 'yes'} onChange={v => update({ rmdReceived: v ? 'yes' : '' })} label="Yes — RMD received" />
-                <Checkbox checked={a.rmdReceived === 'no'} onChange={v => update({ rmdReceived: v ? 'no' : '' })} label="No RMD" />
-              </div>
-              {rmdMissing && (
-                <div className="text-xs mt-1 font-medium" style={{ color: RED }}>
-                  Required — {state} counts this account as income or asset depending on RMD status.
-                </div>
-              )}
-              {a.rmdReceived === 'yes' && (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
-                    <MpField label="RMD amount" required>
-                      <TextInput value={a.rmdAmount} onChange={e => update({ rmdAmount: e.target.value })} placeholder="$" />
-                    </MpField>
-                    <MpField label="RMD frequency">
-                      <Select value={a.rmdFrequency || 'annual'} onChange={e => update({ rmdFrequency: e.target.value })}>
-                        <option value="annual">Annual</option>
-                        <option value="quarterly">Quarterly</option>
-                        <option value="monthly">Monthly</option>
-                      </Select>
-                    </MpField>
-                  </div>
-                  <div className="text-sm mt-2 font-semibold" style={{ color: RED }}>
-                    THIS ACCOUNT IS COUNTED TOWARDS INCOME — per {state} Medicaid guidelines the account value is excluded from assets and the RMD is added to gross monthly income on the Income tab.
-                  </div>
-                </>
-              )}
-              {a.rmdReceived === 'no' && (
-                <div className="text-xs mt-1" style={{ color: MUTED }}>
-                  No RMD — the full account value counts towards {owner === 'spouse' ? "the spouse's" : "the resident's"} countable assets.
-                </div>
-              )}
-            </div>
-          )}
-
-          {isRetirement && state === 'PA' && owner === 'resident' && (
-            <div className="text-xs px-3 py-2 rounded-md" style={{ backgroundColor: '#4a6fa50c', color: '#3a5a85' }}>
-              PA: IRA/401k counts towards assets regardless of RMD status.
-            </div>
-          )}
-          {isRetirement && state === 'PA' && owner === 'spouse' && (
-            spouseInFacility
-              ? <div className="text-xs px-3 py-2 rounded-md" style={{ backgroundColor: '#4a6fa50c', color: '#3a5a85' }}>PA: spouse is institutionalized — this retirement account counts towards assets.</div>
-              : <div className="text-xs px-3 py-2 rounded-md font-medium" style={{ backgroundColor: '#4d7c4a12', color: '#4d7c4a' }}>Per PA Medicaid regulations, the community spouse's IRA/401k is EXEMPT — excluded from countable assets.</div>
-          )}
-
-          <div className="pt-2 border-t" style={{ borderColor: '#00000010' }}>
-            <div className="text-[11px] uppercase tracking-wide mb-1" style={{ color: MUTED }}>Documentation</div>
-            <div className="flex flex-wrap gap-x-6">
-              <Checkbox checked={a.docRequested} onChange={v => update({ docRequested: v })} label="Documentation requested" />
-              <Checkbox checked={a.docReceived} onChange={v => update({ docReceived: v })} label="Received" />
-              <Checkbox checked={a.docReviewed} onChange={v => update({ docReviewed: v })} label="Reviewed" />
-            </div>
-          </div>
-
-          <div className="pt-2 border-t" style={{ borderColor: '#00000010' }}>
-            <label className="flex items-center gap-2 px-3 py-2 rounded-md border cursor-pointer bg-white" style={inputStyle}>
-              <input type="checkbox" checked={!!a.possibleGifting} onChange={e => update({ possibleGifting: e.target.checked })} />
-              <span className="text-sm" style={{ color: a.possibleGifting ? '#c47a3a' : INK }}>
-                <AlertCircle size={12} className="inline mr-1" />
-                Possible gifting / transfer — flag for look-back review
-              </span>
-            </label>
-            {a.possibleGifting && (
-              <div className="mt-2">
-                <MpField label="Gifting notes" hint="Amount, date, recipient — feeds penalty period analysis">
-                  <TextArea rows={2} value={a.giftingNotes} onChange={e => update({ giftingNotes: e.target.value })} />
-                </MpField>
-              </div>
-            )}
-          </div>
-          <MpField label="Notes"><TextArea value={a.notes} onChange={e => update({ notes: e.target.value })} placeholder="Joint titling, beneficiary, exemption reason, etc." /></MpField>
-          <div className="flex justify-end"><Btn variant="ghost" size="sm" onClick={remove}><Trash2 size={14} />Remove</Btn></div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================
-   INCOME
-   ============================================================ */
-
-function IncomeTab({ c, save, updateField, state, facilityId }) {
-  const regs = STATE_REGS[state] || STATE_REGS.OH;
-  const gross = grossMonthlyIncome(c, state);
-  const patientLiab = mpNum(c.income?.estimatedPatientLiabilityOverride) || patientLiabilityEstimate(c, state);
-  const married = c.demographics?.maritalStatus === 'married';
-  const spouseInFacility = c.spouse?.inFacility === 'yes';
-  const verifiedCount = c.incomeSources.filter(x => x.verified).length;
-  const qitNeeded = qitRequired(c, facilityId);
-
-  const residentRmd = rmdMonthlyIncome(c.assets, state, 'resident');
-  const spouseRmd = married ? rmdMonthlyIncome(c.spouseAssets || [], state, 'spouse', spouseInFacility) : 0;
-  const rmdAccounts = (c.assets || []).filter(a => classifyAsset(a, state, 'resident') === 'income');
-
-  const payMethod = INCOME_COLLECTION_METHODS.find(m => m.id === c.tasks?.incomeCollection?.paymentMethod);
-
-  const add = () => {
-    const item = { id: mpUid(), type: '', source: '', amount: '', frequency: 'monthly', receiptMethod: '', receiptDetails: '', verified: false, verifiedDate: '', notes: '' };
-    save({ incomeSources: [...c.incomeSources, item] });
-  };
-  const update = (id, patch) => save({ incomeSources: c.incomeSources.map(x => x.id === id ? { ...x, ...patch } : x) });
-  const remove = (id) => save({ incomeSources: c.incomeSources.filter(x => x.id !== id) });
-
-  return (
-    <>
-      <SectionCard title="Income summary" accent>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Gross monthly income" value={mpMoney(gross)} sub={`${c.incomeSources.length} source${c.incomeSources.length === 1 ? '' : 's'}${residentRmd > 0 ? ` + RMD ${mpMoney(residentRmd)}` : ''}`} />
-          {married ? (
-            <Stat label="Spousal diversion" value="—" sub="Determined by Medicaid" color="#4a6fa5" />
-          ) : <div />}
-          <Stat label="Est. patient liability" value={mpMoney(patientLiab)} sub={`− PNA $${regs.pna} (${state} NF) − Part B $${PART_B_2026}${married ? ' · before spousal diversion' : ''}`} color={patientLiab > 0 ? '#b8873a' : NAVY} />
-          <Stat label="Verified" value={`${verifiedCount}/${c.incomeSources.length}`} sub="income sources" />
-        </div>
-
-        {residentRmd > 0 && (
-          <div className="mt-3 p-3 rounded-md" style={{ backgroundColor: `${RED}0a`, border: `1px solid ${RED}30` }}>
-            <div className="text-[11px] uppercase tracking-wide font-semibold" style={{ color: RED }}>RMD income — retirement accounts counted towards income</div>
-            <div className="text-sm mt-1" style={{ color: INK }}>
-              <b style={{ color: RED }}>{mpMoney(residentRmd)}/mo</b> included in gross monthly income from {rmdAccounts.length} retirement account{rmdAccounts.length === 1 ? '' : 's'} in payout status ({state} Medicaid guidelines). Account value{rmdAccounts.length === 1 ? ' is' : 's are'} excluded from countable assets.
-            </div>
-            <div className="text-xs mt-1" style={{ color: MUTED }}>
-              {rmdAccounts.map(a => `${a.institution || 'Retirement account'} — ${mpMoney(mpNum(a.rmdAmount))}/${a.rmdFrequency || 'annual'}`).join(' · ')}
-            </div>
-          </div>
-        )}
-        {spouseRmd > 0 && (
-          <div className="mt-2 text-xs px-3 py-2 rounded-md" style={{ backgroundColor: '#4a6fa50c', color: '#3a5a85' }}>
-            Spouse RMD income {mpMoney(spouseRmd)}/mo counts towards the spouse's income (not the resident's gross).
-          </div>
-        )}
-
-        {married && (
-          <div className="mt-3 text-xs px-3 py-2 rounded-md font-medium" style={{ backgroundColor: '#00000006', color: NAVY }}>
-            Spousal diversion / spousal income allowance will be determined by Medicaid.
-          </div>
-        )}
-
-        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-          {payMethod && (
-            <div className="text-sm" style={{ color: INK }}>
-              <span className="text-[11px] uppercase tracking-wide mr-2" style={{ color: MUTED }}>Payment to facility</span>
-              <MpPill color={NAVY}>{payMethod.label}</MpPill>
-            </div>
-          )}
-        </div>
-
-        {qitNeeded && (
-          <div className="mt-3 p-3 rounded-md text-sm flex items-center gap-2" style={{ backgroundColor: '#4a6fa515', color: '#3a5a85' }}>
-            <ShieldCheck size={14} />
-            Gross income {mpMoney(gross)} exceeds the Ohio special income limit ({mpMoney(STATE_REGS.OH.incomeLimit)}) — QIT required. The QIT tab is now active.
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-          <MpField label="Override estimated patient liability" hint="Only if calc needs adjustment">
-            <TextInput value={c.income?.estimatedPatientLiabilityOverride || ''}
-              onChange={e => updateField('income.estimatedPatientLiabilityOverride', e.target.value)}
-              placeholder="$" />
-          </MpField>
-        </div>
-        <div className="mt-4">
-          <MpField label="Income notes"><TextArea value={c.income?.notes || ''} onChange={e => updateField('income.notes', e.target.value)} /></MpField>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Income sources — gross amounts" right={<Btn size="sm" onClick={add}><Plus size={14} />Add income</Btn>}>
-        {c.incomeSources.length === 0
-          ? <MpEmpty icon={DollarSign} title="No income sources logged" hint="Enter gross amount (before Medicare Part B / any deductions). RMD income from retirement accounts is added automatically from the Assets tab."
-              action={<Btn onClick={add}><Plus size={14} />Add first source</Btn>} />
-          : <div className="space-y-3">
-              {c.incomeSources.map((x, i) => <IncomeRow key={x.id} x={x} n={i + 1} update={(p) => update(x.id, p)} remove={() => remove(x.id)} />)}
-            </div>}
-      </SectionCard>
-    </>
-  );
-}
-
-function IncomeRow({ x, n, update, remove }) {
-  const [open, setOpen] = useState(!x.type);
-  return (
-    <div className="rounded-md border" style={{ borderColor: x.verified ? '#4d7c4a55' : '#00000012', backgroundColor: x.verified ? '#4d7c4a08' : '#fafaf7' }}>
-      <button onClick={() => setOpen(!open)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left">
-        <div className="text-xs font-mono opacity-40" style={{ color: NAVY }}>{String(n).padStart(2, '0')}</div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium truncate" style={{ color: NAVY }}>
-            {x.type || 'New income source — choose type'}
-            {x.source && <span className="font-normal opacity-70"> · {x.source}</span>}
-          </div>
-          <div className="text-xs flex flex-wrap gap-x-2" style={{ color: MUTED }}>
-            {x.amount && <span>${mpNum(x.amount).toLocaleString()} gross / {x.frequency || 'monthly'}</span>}
-            {x.receiptMethod && <span>· {x.receiptMethod}</span>}
-          </div>
-        </div>
-        {x.verified && <MpPill color="#4d7c4a"><Check size={10} />Verified</MpPill>}
-        <ChevronRight size={14} className={`opacity-40 transition-transform ${open ? 'rotate-90' : ''}`} />
-      </button>
-      {open && (
-        <div className="border-t px-3 pt-3 pb-3 space-y-3" style={{ borderColor: '#00000010' }}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <MpField label="Income type">
-              <Select value={x.type} onChange={e => update({ type: e.target.value })}>
-                <option value="">Select type…</option>
-                {INCOME_TYPES.map(t => <option key={t}>{t}</option>)}
-              </Select>
-            </MpField>
-            <MpField label="Payer / source"><TextInput value={x.source} onChange={e => update({ source: e.target.value })} placeholder="e.g. SSA, Verizon Pension, VA" /></MpField>
-            <MpField label="Gross amount" hint="Before Part B or any deductions"><TextInput value={x.amount} onChange={e => update({ amount: e.target.value })} placeholder="$" /></MpField>
-            <MpField label="Frequency">
-              <Select value={x.frequency} onChange={e => update({ frequency: e.target.value })}>
-                <option value="monthly">Monthly</option>
-                <option value="weekly">Weekly</option>
-                <option value="bi-weekly">Bi-weekly</option>
-                <option value="annual">Annual</option>
-                <option value="one-time">One-time</option>
-              </Select>
-            </MpField>
-            <MpField label="How is it received?">
-              <Select value={x.receiptMethod} onChange={e => update({ receiptMethod: e.target.value })}>
-                <option value="">Select…</option>
-                {RECEIPT_METHODS.map(m => <option key={m}>{m}</option>)}
-              </Select>
-            </MpField>
-            <MpField label="Receipt detail" hint="Bank & acct last 4, rep payee name, PO box, etc.">
-              <TextInput value={x.receiptDetails} onChange={e => update({ receiptDetails: e.target.value })} />
-            </MpField>
-            <MpField label="Verified?">
-              <label className="flex items-center gap-2 px-3 py-2 rounded-md border cursor-pointer bg-white" style={inputStyle}>
-                <input type="checkbox" checked={!!x.verified}
-                  onChange={e => update({ verified: e.target.checked, verifiedDate: e.target.checked ? (x.verifiedDate || today()) : '' })} />
-                <span className="text-sm">Award letter / benefit statement received</span>
-              </label>
-            </MpField>
-            {x.verified && <MpField label="Date verified"><TextInput type="date" value={x.verifiedDate} onChange={e => update({ verifiedDate: e.target.value })} /></MpField>}
-          </div>
-          <MpField label="Notes"><TextArea value={x.notes} onChange={e => update({ notes: e.target.value })} placeholder="COLA history, deductions, garnishments, etc." /></MpField>
-          <div className="flex justify-end"><Btn variant="ghost" size="sm" onClick={remove}><Trash2 size={14} />Remove</Btn></div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================
-   QIT (Ohio — auto-shown when income exceeds limit)
-   ============================================================ */
-
-function QITTab({ c, updateField }) {
-  const q = c.qit;
-  const gross = grossMonthlyIncome(c, 'OH');
-  const requiredFunding = Math.max(0, gross - STATE_REGS.OH.incomeLimit);
-  const deposit = mpNum(q.monthlyDeposit);
-  return (
-    <SectionCard title="Qualified Income Trust (Ohio)" right={<MpPill color="#4a6fa5"><ShieldCheck size={10} />Auto-triggered — income above OH limit</MpPill>}>
-      <div className="text-sm mb-4" style={{ color: MUTED }}>
-        Ohio requires a Miller/QIT trust for LTC applicants whose gross monthly income exceeds the special income limit ({mpMoney(STATE_REGS.OH.incomeLimit)}/mo, 2026 est.). Track establishment, banking, and monthly deposits here.
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3 p-3 rounded-md" style={{ backgroundColor: '#4a6fa50c' }}>
-        <Stat label="Gross monthly income" value={mpMoney(gross)} />
-        <Stat label="OH income limit" value={mpMoney(STATE_REGS.OH.incomeLimit)} sub="300% FBR · 2026" />
-        <Stat label="Required monthly QIT funding" value={mpMoney(requiredFunding)} color={requiredFunding > 0 ? RED : '#4d7c4a'} sub={`gross − income limit (minimum)`} />
-      </div>
-      <div className="text-xs px-3 py-2 rounded-md mb-4" style={{ backgroundColor: '#00000006', color: MUTED }}>
-        At minimum, the income above the limit ({mpMoney(requiredFunding)}/mo) must flow through the QIT each month. Many families deposit one full income source instead — anything at or above the required amount works.
-      </div>
-      {deposit > 0 && deposit < requiredFunding && (
-        <div className="text-sm px-3 py-2 rounded-md mb-4 flex items-center gap-2" style={{ backgroundColor: `${RED}15`, color: RED }}>
-          <AlertCircle size={14} className="shrink-0" />
-          Entered monthly deposit ({mpMoney(deposit)}) is below the required funding amount ({mpMoney(requiredFunding)}) — eligibility is at risk.
-        </div>
-      )}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <MpField label="Trust established?">
-          <Select value={q.established} onChange={e => updateField('qit.established', e.target.value)}>
-            <option value="no">Not yet — needed</option>
-            <option value="drafting">Drafting</option>
-            <option value="signed">Signed, awaiting bank account</option>
-            <option value="active">Active & funded</option>
-          </Select>
-        </MpField>
-        <MpField label="Effective date"><TextInput type="date" value={q.effectiveDate} onChange={e => updateField('qit.effectiveDate', e.target.value)} /></MpField>
-        <MpField label="Bank name"><TextInput value={q.bankName} onChange={e => updateField('qit.bankName', e.target.value)} /></MpField>
-        <MpField label="Account # (last 4)"><TextInput value={q.accountNumber} onChange={e => updateField('qit.accountNumber', e.target.value)} placeholder="****1234" /></MpField>
-        <MpField label="Trustee"><TextInput value={q.trustee} onChange={e => updateField('qit.trustee', e.target.value)} placeholder="Trustee name & relationship" /></MpField>
-        <MpField label="Monthly deposit" hint={requiredFunding > 0 ? `Minimum required: ${mpMoney(requiredFunding)}` : undefined}>
-          <TextInput value={q.monthlyDeposit} onChange={e => updateField('qit.monthlyDeposit', e.target.value)} placeholder={requiredFunding > 0 ? `Min ${mpMoney(requiredFunding)}` : '$'} />
-        </MpField>
-        <MpField label="First deposit date"><TextInput type="date" value={q.firstDepositDate} onChange={e => updateField('qit.firstDepositDate', e.target.value)} /></MpField>
-      </div>
-      <div className="mt-4">
-        <MpField label="QIT notes" hint="Deposit issues, bank cooperation, PCSP interaction, etc.">
-          <TextArea value={q.notes} onChange={e => updateField('qit.notes', e.target.value)} rows={4} />
-        </MpField>
-      </div>
-    </SectionCard>
-  );
-}
-
-/* Migrate older case shapes to the current schema so nothing crashes */
-function migrateCase(c) {
-  const template = blankCase(c.facilityId);
-  const deep = (a, b) => {
-    if (a === undefined) return b;
-    if (typeof a !== 'object' || a === null || Array.isArray(a)) return a;
-    const out = {};
-    for (const k in b) out[k] = deep(a[k], b[k]);
-    for (const k in a) if (!(k in out)) out[k] = a[k];
-    return out;
-  };
-  const merged = deep(c, template);
-  // legacy: single "verified" checkbox on assets -> map to Reviewed; ensure RMD fields exist
-  const fixAsset = (a) => ({
-    docRequested: false, docReceived: false,
-    revocable: false, irrevocable: false,
-    rmdReceived: '', rmdAmount: '', rmdFrequency: 'annual',
-    ...a,
-    docReviewed: a.docReviewed !== undefined ? !!a.docReviewed : !!a.verified,
-  });
-  merged.assets = (merged.assets || []).map(fixAsset);
-  merged.spouseAssets = (merged.spouseAssets || []).map(fixAsset);
-  return merged;
-}
-
-// ================= MEDICAID PENDING (preview embed) =================
-const mpCasesMem = {}; // facilityId -> cases[] — PREVIEW ONLY, resets on refresh
-function MedicaidModule({ facility, role, userEmail }) {
-  mpSyncFacilities();
-  const [cases, setCases] = useState(() => mpCasesMem[facility.id] || (mpCasesMem[facility.id] = []));
-  const [currentCase, setCurrentCase] = useState(null);
-  const session = {
-    role: (role === "admin" || role === "corporate") ? "admin" : "facility",
-    userName: (userEmail || "").split("@")[0] || "User",
-    facilityId: facility.id,
-  };
-  const createCase = () => {
-    const c = blankCase(facility.id, session.userName);
-    const next = [c, ...cases];
-    mpCasesMem[facility.id] = next; setCases(next);
-    return c.id;
-  };
-  const updateCase = (id, patch) => setCases(prev => {
-    const next = prev.map(x => x.id === id ? { ...x, ...patch, updatedAt: new Date().toISOString() } : x);
-    mpCasesMem[facility.id] = next; return next;
-  });
-  const deleteCase = (id) => setCases(prev => {
-    const next = prev.filter(x => x.id !== id);
-    mpCasesMem[facility.id] = next;
-    return next;
-  });
-  const caseData = cases.find(x => x.id === currentCase) || null;
-  return (
-    <div>
-      <div style={{ fontSize: 12, color: "#8a6d1f", background: "#fdf4dd", border: "1px solid #d9c489", borderRadius: 8, padding: "8px 10px", marginBottom: 12 }}>
-        Preview — cases reset on refresh here. The live build will save to the real database with full audit logging.
-      </div>
-      {currentCase && caseData ? (
-        <CaseDetail facilityId={facility.id} caseId={currentCase} session={session} caseData={caseData}
-          onUpdateCase={updateCase} onDeleteCase={(id) => { deleteCase(id); setCurrentCase(null); }}
-          onBack={() => setCurrentCase(null)} onLogout={() => {}} />
-      ) : (
-        <FacilityView facilityId={facility.id} session={session} cases={cases} loading={false}
-          onCreateCase={createCase} onBack={null} onOpenCase={setCurrentCase} onLogout={() => {}} />
-      )}
-    </div>
-  );
-}
-// ================= end MEDICAID PENDING =================
-
-
-// ================= ROSTER V2 (preview) — directory built from the ECG Contact Roster workbook =================
+// ================= ROSTER (live) — org-wide directory, stored in org_doc "roster" =================
 const ROSTER_SEED = {"facilities":[{"name":"Champion City","fullName":"Champion City Nursing & Rehabilitation Center","profile":{"ADDRESS":"6655 Frankstown Avenue, Pittsburgh, PA 15206","PHONE":"412-665-3232","WEB":"www.championcitynursing.com","BILLING":"CBS (Centralized Business Services)","LEGAL ENTITY":"CVRC OPCO LLC","EIN":"99-4018333","NPI":"1104712140","MEDICARE CCN":"395423","MEDICAID PROVIDER ID":"103577556-001","STATE LICENSE #":"060402 exp 4/30/27","BED COUNT":"187","CMS STAR RATING":"1-Star","CHOW / OWNERSHIP DATE":"2026-02-18"},"team":[{"role":"Administrator","name":"Maribeth Tarpley, BSN, LNHA, PCHA","email":"mtarpley@championcitynursing.com","phone":"412-665-3232","notes":""},{"role":"BOM (Acting)","name":"Sol Shechter","email":"sol@championcitynursing.com","phone":"347-765-6287 (C)","notes":"Acting BOM \u2014 corporate coverage"},{"role":"Director of Nursing (DON)","name":"Crystal Payne Russel","email":"crussel@championcitynursing.com","phone":"412-403-5569","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"Morgan Russel","email":"mrussel@championcitynursing.com","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Medical Director","name":"Dr. Golani","email":"\u2014 TO FILL \u2014","phone":"412-841-0925","notes":"Transitioning to Dr. McClain"},{"role":"Central Intake","name":"Marrisa Sasso","email":"msasso@eminentcaregroup.com","phone":"732-865-1050","notes":""},{"role":"MDS Coordinator","name":"Lorraine Ferguson","email":"lferguson@championcitynursing.com","phone":"(412) 735-8216 (C)","notes":""},{"role":"Case Manager","name":"Corporate/Michelle Hetrick","email":"mhetrick@edencentercare.com","phone":"724-826-1943","notes":"Unknown"},{"role":"Social Services Director","name":"Amanda Workman","email":"aworkman@championcitynursing.com","phone":"(412) 427-1103 (C)","notes":""},{"role":"Activities Director","name":"Autumn Htrick","email":"ahetrick@championcitynursing.com","phone":"724-472-5541","notes":"Postion Open"},{"role":"Director of Rehabilitation","name":"Sharon Novalis","email":"SNovalis@championcitynursing.com","phone":"(412) 260-3570 (C)","notes":""},{"role":"Dietary Director","name":"Walter Williams","email":"wwilliams@championcitynursing.com","phone":"(412) 728-4690 (C)","notes":""},{"role":"Director of Environmental Services","name":"Anthony Carter","email":"acarter@championcitynursing.com","phone":"(412) 339-7093 (C)","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Thomas Hess","email":"thess@championcitynursing.com","phone":"(412) 445-6929 (C)","notes":""},{"role":"Staff Development Coordinator","name":"Shaniqua Grey","email":"sgrey@championcitynursing.com","phone":"(878) 302-7922 (C)","notes":""},{"role":"Infection Preventionist","name":"Shaniqua Grey","email":"sgrey@championcitynursing.com","phone":"(878) 302-7922 (C)","notes":""},{"role":"HR Director","name":"Isabella \"Izzy\" Harris","email":"iharris@championcitynursing.com","phone":"(412) 665-3236 x 380","notes":""}]},{"name":"Eden","fullName":"Eden Center for Nursing and Healing","profile":{"ADDRESS":"1050 Broadview Blvd, Brackenridge, PA 15014","PHONE":"724-224-9200","WEB":"www.edencentercare.com","BILLING":"CBS (Centralized Business Services)","LEGAL ENTITY":"PRRC OPCO LLC","EIN":"99-4213479","NPI":"1356282586","MEDICARE CCN":"395011","MEDICAID PROVIDER ID":"1046622615-0001","STATE LICENSE #":"70302","BED COUNT":"97","CMS STAR RATING":"1-Star","CHOW / OWNERSHIP DATE":"6/9/2026"},"team":[{"role":"Administrator (Acting)","name":"Shala Currey","email":"Scurrey@eminentcaregroup.com","phone":"304-694-1211 (M)","notes":"Acting Administrator \u2014 Regional Admin covering Eden"},{"role":"BOM (Acting) / Case Manager","name":"Michele Hetrick, LPNAC","email":"mhetrick@edencentercare.com","phone":"724-826-1943","notes":"Formal role: LPNAC / Case Manager. Currently acting as BOM."},{"role":"Director of Nursing (DON)","name":"Monica McWilson","email":"mmcwilson@edencentercare.com","phone":"412-638-9240","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Medical Director","name":"Dr. Golani","email":"uagolani@upmc.org","phone":"412-841-0925","notes":""},{"role":"Admissions Coordinator","name":"Stephanie Nagey","email":"snagey@edencentercare.com","phone":"724-388-9321","notes":""},{"role":"MDS Coordinator","name":"Christine Milner","email":"cmilner@edencentercare.com","phone":"724-409-7443 (c)","notes":""},{"role":"Social Services Director","name":"Haddessah Devereaux","email":"hdevereaux@edencentercare.com","phone":"724-351-3002","notes":""},{"role":"Activities Director","name":"Susan Strie","email":"sstrzesiewski@edencentercare.com","phone":"724-448-0764","notes":""},{"role":"Director of Rehabilitation","name":"Kimberly Kress","email":"Kkress@edencenetercare.com","phone":"412-780-6657","notes":""},{"role":"Dietary Director","name":"Julie Dawson","email":"jdawson@edencentercare.com","phone":"724-584-4834","notes":""},{"role":"Director of Environmental Services","name":"Tabatha Jack","email":"Tjack@edencentercare.com","phone":"412-427-7512","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Morgan O'Dell","email":"Modell@edencentercare.com","phone":"724-448-6274","notes":""},{"role":"Staff Development Coordinator","name":"Crystal Monroe","email":"cmonroe@edencentercare.com","phone":"412-509-3478","notes":""},{"role":"Infection Preventionist","name":"Andrea Parkin","email":"aparkin@edencentercare.com","phone":"412-480-1530","notes":""},{"role":"HR Director","name":"Crystal Monroe","email":"cmonroe@edencentercare.com","phone":"412-509-3478","notes":""}]},{"name":"Aristos","fullName":"Aristos Rehabilitation & Nursing Center","profile":{"ADDRESS":"4650 Rocky River Dr, Cleveland, OH 44135","PHONE":"216-267-5445","WEB":"www.aristosnursingcenter.com","BILLING":"CBS (Centralized Business Services)","LEGAL ENTITY":"Aristos OPCO LLC","EIN":"33-1837605","NPI":"1609685023","MEDICARE CCN":"366058","MEDICAID PROVIDER ID":"96762","STATE LICENSE #":"0993N","BED COUNT":"57","CMS STAR RATING":"3-Star","CHOW / OWNERSHIP DATE":"2024-12-31"},"team":[{"role":"Administrator","name":"Michelle Wood","email":"MWood@aristosnursingcenter.com","phone":"440-371-0990","notes":""},{"role":"AIT","name":"Yehuda Biren","email":"","phone":"","notes":""},{"role":"BOM/HR Director","name":"Nadine Black","email":"nblack@aristosnursingcenter.com","phone":"216-323-7537","notes":""},{"role":"Director of Nursing (DON)","name":"Letitia Fergus","email":"lfergus@eminentcaregroup.com","phone":"216-346-1788","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"Alexus Jones","email":"Ajones@aristosnursingcenter.com","phone":"216-699-3437","notes":""},{"role":"Medical Director","name":"Khaleel Deeb","email":"khaldeeb@yahoo.com","phone":"440-318-5061","notes":""},{"role":"Admissions Coordinator","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"MDS Coordinator","name":"Nomie Biren","email":"Nfermaglich@eminentcaregroup.com","phone":"646-575-5101","notes":""},{"role":"Case Manager","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Social Services Director","name":"Jennifer Billings","email":"jbillings@aristosnursingcenter.com","phone":"(216) 267-5445","notes":""},{"role":"Activities Director","name":"Lynn Young","email":"Lyoung@aristosnursingcenter.com","phone":"216-789-6548","notes":""},{"role":"Director of Rehabilitation","name":"Katelyn McDowell","email":"Kmcdowell@aristosnursingcenter.com","phone":"330-283-5764","notes":""},{"role":"Dietary Director","name":"Angela Gainey","email":"AGainey@aristosnursingcenter.com","phone":"440-429-3030","notes":""},{"role":"Director of Environmental Services","name":"Alexis Parker","email":"Aparker@aristosnursingcenter.com","phone":"216-214-0710","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Sam Nathan","email":"Snathan@aristosnursingcenter.com","phone":"440-561-3153","notes":""},{"role":"Staff Development Coordinator","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Infection Preventionist","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"HR Director","name":"Nadine Black","email":"nblack@aristosnursingcenter.com","phone":"216-323-7537","notes":""}]},{"name":"Alpine","fullName":"Alpine","profile":{"ADDRESS":"164 Office Park Dr, Xenia, OH 45385","PHONE":"937-419-4500 (P) \u00b7 937-230-6296 (F)","WEB":"www.alpinenursing.com","BILLING":"CBS (Centralized Business Services)","LEGAL ENTITY":"Alpine OPCO LLC","EIN":"33-1819865","NPI":"1962211383","MEDICARE CCN":"365601","MEDICAID PROVIDER ID":"96663","STATE LICENSE #":"1775N","BED COUNT":"99","CMS STAR RATING":"2-Star","CHOW / OWNERSHIP DATE":"2024-12-31"},"team":[{"role":"Administrator","name":"Jazmaine Smith, MHA, LNHA","email":"jsmith@alpinenursingcenter.com","phone":"937-271-7989 (C) \u00b7 937-419-4500 (P)","notes":"Dual role \u2014 Administrator at Alpine & Atrium"},{"role":"BOM","name":"Christy Kyle","email":"ckyle@alpinenursingcenter.com","phone":"937-681-4614","notes":""},{"role":"Director of Nursing (DON)","name":"Angie Ivey","email":"aivey@alpinenursingcenter.com","phone":"937-532-6643","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"Amber Harding (start 8/3/26)","email":"aharding@alpinenursingcenter.com","phone":"937-532-4337","notes":"starts 8/3/26 as ADON"},{"role":"Medical Director","name":"Parminder Modgil","email":"parminder.modgil@gmail.com","phone":"937-430-1230","notes":""},{"role":"Admissions Coordinator","name":"Bianca Hoard","email":"bhoard@alpinenursingcenter.com","phone":"937-241-7559","notes":""},{"role":"MDS Coordinator","name":"Brandy Younker","email":"byounker@alpinenursingcenter.com","phone":"937-812-1487","notes":""},{"role":"Case Manager","name":"n/a","email":"n/a","phone":"n/a","notes":""},{"role":"Social Services Director","name":"Amber Moss","email":"amoss@alpinenursingcenter.com","phone":"937-732-0950","notes":""},{"role":"Activities Director","name":"Tamera McConnaha","email":"tmcconnaha@alpinenursingcenter.com","phone":"326-212-9748","notes":""},{"role":"Director of Rehabilitation","name":"Robert Peterson","email":"rpeterson@alpinenursingcenter.com","phone":"785-845-9951","notes":""},{"role":"Dietary Director","name":"BJ Spillman","email":"bspillman@alpinenursingcenter.com","phone":"937-532-0985","notes":""},{"role":"Director of Environmental Services","name":"Keri Tucker","email":"ktucker@alpinenursingcenter.com","phone":"937-728-6023","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"George Rager","email":"grager@alpinenursingcenter.com","phone":"937-450-7511","notes":""},{"role":"Staff Development Coordinator","name":"n/a","email":"n/a","phone":"n/a","notes":""},{"role":"Infection Preventionist","name":"Vicki Miler (until 8/3/26 then Amber H)","email":"vmiler@alpinenursingcenter.com","phone":"937-219-4051","notes":""},{"role":"Director of Respiratory Therapy","name":"Patrick Lopez","email":"plopez@alpinenursingcenter.com","phone":"937-416-9354","notes":""},{"role":"HR Director","name":"Chasity Skodny","email":"cskodny@alpinenursingcenter.com","phone":"419-577-3060","notes":""}]},{"name":"Aspen Glen","fullName":"Aspen Glen Rehabilitation & Nursing Center","profile":{"ADDRESS":"500 Selfridge St, East Liverpool, OH 43920","PHONE":"330-385-5001","WEB":"www.aspenglencare.com","BILLING":"Fiscal Care Services","LEGAL ENTITY":"","EIN":"42-2492815","NPI":"125526047","MEDICARE CCN":"366306","MEDICAID PROVIDER ID":"","STATE LICENSE #":"1744N","BED COUNT":"67","CMS STAR RATING":"5-Star","CHOW / OWNERSHIP DATE":"6/30/2026"},"team":[{"role":"Administrator","name":"Stephanie Wolfe","email":"swolfe@aspenglencare.com","phone":"(330) 385-5001 x 1102","notes":""},{"role":"BOM","name":"Elizabeth Farnsworth","email":"EFarnsworth@aspenglencare.com","phone":"(330) 385-5001 x 1122","notes":""},{"role":"Director of Nursing (DON)","name":"Ashley Scafide","email":"ascafide@aspenglencare.com","phone":"(330)385-5001 x 1113","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"","email":"","phone":"","notes":""},{"role":"Medical Director","name":"Gretchan Nickell","email":"gnickell@primehealthcare.com","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Admissions Coordinator","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"MDS Coordinator","name":"Marissa Hughes","email":"mhughes@aspenglencare.com","phone":"(330)385-5001 x 1107","notes":""},{"role":"Case Manager","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Social Services Director","name":"Samantha Shaffer","email":"sshaffer@aspenglencare.com","phone":"(330)385-5001 x 1101","notes":""},{"role":"Activities Director","name":"Laura Strezze","email":"lstrezze@aspenglencare.com","phone":"(330)385-5001 x 1108","notes":""},{"role":"Director of Rehabilitation","name":"Veronica Keenan","email":"vkeenan@aspenglencare.com","phone":"(330)385-5001 x 1114","notes":""},{"role":"Dietary Director","name":"Tucker Wilson","email":"Tucker.Wilson@aspenglencare.com","phone":"(330)385-5001 x 1111","notes":""},{"role":"Director of Environmental Services","name":"Kathy Culp","email":"kculp@aspenglencare.com","phone":"(330)385-5001x 1118","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Eric Kaufmann","email":"ekaufmann@aspenglencare.com","phone":"(330)385-5001 x 1112","notes":""},{"role":"Staff Development Coordinator","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Infection Preventionist","name":"Ashley Scafide","email":"ascafide@aspenglencare.com","phone":"(330)385-5001 x1113","notes":""},{"role":"HR Director","name":"Elizabeth Farnsworth","email":"EFarnsworth@aspenglencare.com","phone":"(330)385-5001 x 1122","notes":""}]},{"name":"The Pearl","fullName":"The Pearl Rehabilitation & Nursing Center","profile":{"ADDRESS":"1335 Portland Ave, Rochester, NY 14621","PHONE":"585-504-0400","WEB":"www.pearlnursing.com","BILLING":"Fiscal Care Services","LEGAL ENTITY":"The Pearl Nursing Center of Rochester, LLC","EIN":"823152677","NPI":"1215557988","MEDICARE CCN":"335439001","MEDICAID PROVIDER ID":"355555","STATE LICENSE #":"2701366N","BED COUNT":"120","CMS STAR RATING":"1-Star","CHOW / OWNERSHIP DATE":"\u2014 TO FILL \u2014"},"team":[{"role":"Administrator","name":"David Goldman, LMSW, LNHA","email":"DGoldman@pearlnursing.com","phone":"585-504-0400 Ext. 3116","notes":""},{"role":"BOM","name":"Dana Jackson","email":"DJackson@pearlnursing.com","phone":"585-705-2945","notes":""},{"role":"Director of Nursing (DON)","name":"Tammy Dusen","email":"Tdusen@pearlnursing.com","phone":"585-409-3834","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"JOanne Marshall Bartley","email":"Jmarshall@pearlnursing.com>","phone":"704-420-0522","notes":""},{"role":"Medical Director","name":"Seth Mensah","email":"seth.mensah@firstdocs.com","phone":"585-478-7240","notes":""},{"role":"Admissions Coordinator","name":"Cheryl Linsey","email":"clinsey@pearlnursing.com","phone":"585-797-4087 (C)","notes":""},{"role":"MDS Coordinator","name":"MCkenzie  Marinaccio","email":"mmarinaccio@pearlnursing.com","phone":"585-329-6454","notes":""},{"role":"Case Manager","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Social Services Director","name":"Stephanie Herman","email":"sherman@pearlnursing.com","phone":"585-733-8129","notes":""},{"role":"Activities Director","name":"Bho Swizdor","email":"Bswizdor@pearlnursing.com","phone":"315-391-3972","notes":""},{"role":"Director of Rehabilitation","name":"Jackie Sage","email":"Jsage@pearlnursing.com","phone":"716-343-0882","notes":""},{"role":"Dietary Director","name":"Livonia Holiday","email":"Lholiday@pearlnursing.com","phone":"585-448-5610","notes":""},{"role":"Director of Environmental Services","name":"Tyrone Johnson","email":"Tjohnson@pearlnurisng.com","phone":"585-448-5610","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Jamel Dickerson","email":"jdickerson@pearlnursing.com","phone":"585-217-6497","notes":""},{"role":"Staff Development Coordinator","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Infection Preventionist","name":"JOanne Marshall Bartley","email":"Jmarshall@pearlnursing.com>","phone":"704-420-0522","notes":""},{"role":"HR Director","name":"Claudine Carson","email":"ccarson@pearlnursing.com","phone":"585-404-5722","notes":""}]},{"name":"Highland Park","fullName":"Highland Park Rehabilitation & Nursing Center","profile":{"ADDRESS":"160 Seneca Street, Wellsville, NY 14895","PHONE":"585-593-3750 (P) \u00b7 585-593-5860 (F)","WEB":"www.highlandparkrehab.com","BILLING":"Fiscal Care Services","LEGAL ENTITY":"HPRC Opco LLC","EIN":"99-1040137","NPI":"1063542223","MEDICARE CCN":"335210","MEDICAID PROVIDER ID":"369200","STATE LICENSE #":"0228306N","BED COUNT":"80","CMS STAR RATING":"5-Star","CHOW / OWNERSHIP DATE":"2024-02-01"},"team":[{"role":"Administrator","name":"Blake Apsokardu, LNHA","email":"bapsokardu@highlandparkrehab.com","phone":"585-593-3750 Ext. 303","notes":""},{"role":"BOM / Admissions","name":"Alisa L Swartz","email":"Aswartz@highlandparkrehab.com","phone":"585-593-3750 Ext. 322","notes":""},{"role":"Director of Nursing (DON)","name":"Bernadine \"Dina\" Billings","email":"bbillings@highlandparkrehab.com","phone":"585-610-3201 (c)","notes":""},{"role":"Assistant Director of Nursing (ADON)","name":"Elizabeth Aaron","email":"eaaron@highlandparkrehab.com","phone":"585-593-3750 311","notes":""},{"role":"Medical Director","name":"Dr. Jialin Nah","email":"jnah@medelitegrp.com","phone":"607-215-2467","notes":""},{"role":"Admissions Coordinator","name":"Alisa L Swartz","email":"Aswartz@highlandparkrehab.com","phone":"585-593-3750 322","notes":""},{"role":"MDS Coordinator","name":"Pam Zimmerman","email":"pzimmerman@highlandparkrehab.com","phone":"585-593-3750 308","notes":""},{"role":"Case Manager","name":"\u2014 TO FILL \u2014","email":"\u2014 TO FILL \u2014","phone":"\u2014 TO FILL \u2014","notes":""},{"role":"Social Services Director","name":"Julie Bliven","email":"jbiven@highlandparkrehab.com","phone":"585-593-3750 317","notes":""},{"role":"Activities Director","name":"Kimberly Slawson","email":"kslawson@highlandparkrehab.com","phone":"585-593-3750 310","notes":""},{"role":"Director of Rehabilitation","name":"Tammy Munro","email":"Tmunro@highlandparkrehab.com","phone":"585-593-3750 313","notes":""},{"role":"Dietary Director","name":"Sandra Campbell","email":"scampbell@highlandparkrehab.com","phone":"585-593-3750 307","notes":""},{"role":"Director of Environmental Services","name":"LeeAnn Hunt","email":"lhunt@highlandparkrehab.com","phone":"585-593-3750 325","notes":""},{"role":"Director of Maintenance / Plant Ops","name":"Tom Whitsell","email":"twhitsell@highlandparkrehab.om","phone":"585-593-3750 309","notes":""},{"role":"Staff Development Coordinator","name":"Wanda Dickerson","email":"wdickerson@highlandparkrehab.com","phone":"585-593-3750 314","notes":""},{"role":"Infection Preventionist","name":"Elizabeth Aaron","email":"eaaron@highlandparkrehab.com","phone":"585-593-3750 311","notes":""},{"role":"HR Director","name":"Sharon Jones","email":"sjones@highlandparkrehab.com","phone":"585-593-3750 304","notes":""}]}],"corporate":[{"group":"Executive Leadership","people":[{"name":"Yanky Geldzahler","title":"Chief Executive Officer","email":"yanky@eminentcaregroup.com","phone":"917-588-7428 (M) \u00b7 732-639-1022 x 101 (O)","notes":"OWNER"},{"name":"Chaim Ausch","title":"Chief Financial Officer","email":"chaim@eminentcaregroup.com","phone":"347-300-6042 (M) \u00b7 732-639-1022 x 105 (O)","notes":"OWNER"},{"name":"Eli Gunzburg","title":"Chief Operating Officer","email":"EG@eminentcaregroup.com","phone":"216-701-2234","notes":"COO \u2014 buildings & facility operations. Administrators report to Eli."},{"name":"Rivka Yakubovsky","title":"Executive Assistant","email":"rivka@eminentcaregroup.com","phone":"732-691-1712 (M) \u00b7 732-639-1022 Ext. 108 (O)","notes":"Executive support to CEO & CFO. Best route for scheduling with Yanky/Chaim."}]},{"group":"Finance & Business Office","people":[{"name":"Ari Weber","title":"Controller","email":"aw@eminentcaregroup.com","phone":"347-489-6501 (M) \u00b7 732-639-1022 x 103 (O)","notes":"Reports to Chaim (CFO)"},{"name":"Sophia","title":"Corporate BOM \u2014 Field & Payer-Side","email":"skass@eminentcaregroup.com","phone":"(M) \u00b7 732-639-1022 x 109 (O)","notes":"Front-end. Admissions, Pending, appeals, contract negotiations. Travels."},{"name":"Rose","title":"Corporate BOM \u2014 Office & Systems","email":"rroberts@eminentcaregroup.com","phone":"(M) \u00b7 732-639-1022 x 110 (O)","notes":"Back-end. Census, AR, cash, month-end. In the office."},{"name":"Faigy Ungar","title":"AP Director","email":"faigy@eminentcaregroup.com","phone":"929-625-6892 (M) \u00b7 732-639-1022 x 102 (O)","notes":"Reports to Chaim (CFO)"},{"name":"Ritshy Kaufman","title":"AP \u2014 NY / PA","email":"ritshy@eminentcaregroup.com","phone":"347-471-7596 (M) \u00b7 732-639-1022 x 104 (O)","notes":"Reports to Faigy Ungar"}]},{"group":"Operations","people":[{"name":"Sol Shechter","title":"Director of Operations","email":"sol@eminentcaregroup.com","phone":"347-765-6287 (C)","notes":"Currently acting as BOM at Champion City"},{"name":"Stacie Atherton, LNHA","title":"Regional Administrator \u2014 Ohio","email":"satherton@eminentcaregroup.com","phone":"614-715-0464 (C)","notes":""},{"name":"Shala Currey","title":"Regional Administrator \u2014 PA & NY","email":"Scurrey@eminentcaregroup.com","phone":"304-694-1211 (M)","notes":"Currently acting as Administrator at Eden."}]},{"group":"Nursing / Clinical","people":[{"name":"Layna Scafide","title":"VP of Nursing","email":"layna@eminentcaregroup.com","phone":"234-736-6800","notes":""},{"name":"Amanda Seibert","title":"RDCS \u2014 Ohio","email":"aseibert@eminentcaregroup.com","phone":"419-956-2330","notes":"Regional Director of Clinical Services"},{"name":"Sissy Mercer","title":"RDCS \u2014 Pennsylvania","email":"smercer@eminentcaregroup.com","phone":"330-206-0828","notes":""}]},{"group":"MDS","people":[{"name":"Presley Rine, BSN, RN, RAC-CT","title":"VP of MDS & Clinical Reimbursement","email":"PRine@eminentcaregroup.com","phone":"304-312-9489","notes":""},{"name":"Debra (Debbie) Diehl","title":"Regional MDS Director \u2014 PA","email":"ddiehl@eminentcaregroup.com","phone":"412-818-2317","notes":""},{"name":"Shanna Braden","title":"MDS Float","email":"sbraden@eminentcaregroup.com","phone":"440-812-7928","notes":""},{"name":"OPEN POSITION","title":"Regional MDS Director \u2014 NY","email":"\u2014","phone":"\u2014","notes":"Position open \u2014 hiring"},{"name":"OPEN POSITION","title":"Regional MDS Director \u2014 OH","email":"\u2014","phone":"\u2014","notes":"Position open \u2014 hiring"}]},{"group":"Case Management & Clinical Support","people":[{"name":"Petrina Garritano, PT, MHA","title":"Corporate Director of Case Management","email":"pgarritano@eminentcaregroup.com","phone":"614-314-7556 (M)","notes":""},{"name":"Nathan Wilson","title":"Clinical Informatics Specialist (PCC)","email":"nwilson@eminentcaregroup.com","phone":"724-570-9155","notes":"PCC system specialist"},{"name":"Dayna Krofta","title":"Corporate Educator","email":"dkrofta@eminentcaregroup.com","phone":"330-990-2126","notes":""}]},{"group":"Rehab","people":[{"name":"Jessica Novak","title":"VP of Rehab","email":"jnovak@eminentcaregroup.com","phone":"814-330-5973 (M)","notes":""},{"name":"Jordan Perowski","title":"Regional Director of Therapy","email":"jperkowski@eminentcaregroup.com","phone":"814-823-9596 (M)","notes":""}]},{"group":"Human Resources","people":[{"name":"TO BE FILLED","title":"VP of Human Resources","email":"","phone":"","notes":""},{"name":"Courtney DuBray","title":"Corp. Director of Talent Acquisition","email":"cdubray@eminentcaregroup.com","phone":"216-452-8701","notes":""},{"name":"Avi Wertzberger","title":"Employee Experience","email":"avi@eminentcaregroup.com","phone":"347-829-4581","notes":""}]},{"group":"Marketing & Admissions","people":[{"name":"Marissa Sasso","title":"Director of Centralized Admissions","email":"msasso@eminentcaregroup.com","phone":"732-865-1050 (M) \u00b7 732-639-1022 x 107 (O)","notes":""},{"name":"Brittany Ashley","title":"Regional Marketer \u2014 Ohio","email":"bashley@eminentcaregroup.com","phone":"937-463-3617","notes":""},{"name":"Jonathan (Chesky) Schlesinger","title":"Social Media Manager","email":"Jschlesinger@eminentcaregroup.com","phone":"347-397-5985","notes":""},{"name":"OPEN POSITION","title":"VP of Marketing & Admissions","email":"\u2014","phone":"\u2014","notes":"Position open \u2014 hiring"}]},{"group":"Maintenance","people":[{"name":"Shayne Long","title":"Director of Maintenance","email":"slong@eminentcaregroup.com","phone":"814-673-3439","notes":""},{"name":"Ben Coogan","title":"Corporate Maintenance","email":"bcoogan@eminentcaregroup.com","phone":"814-504-7391","notes":""}]},{"group":"Social Services","people":[{"name":"Sara Yusko, MS, MSSA, LSW","title":"Regional Director of Social Services and Activities","email":"SaraY@eminentcaregroup.com","phone":"440-812-7960","notes":""}]},{"group":"Legal & Compliance","people":[{"name":"G. Brenda Coey, Esq.","title":"VP of Legal Affairs & Compliance","email":"brenda@eminentcaregroup.com","phone":"330-327-7349","notes":""}]}],"partners":[{"org":"Fiscal Care Services, LLC","type":"Billing Services","serves":"Highland Park \u00b7 The Pearl \u00b7 Aspen Glen","address":"200 Blvd of the Americas, Suite 100, Lakewood, NJ 08701","web":"www.fiscalcareservices.com","phone":"","people":[{"name":"Pessie Gelley","title":"President","email":"\u2014 TO FILL \u2014","phone":"732-893-7880 Ext. 2031  \u00b7  Fax 732-358-0337","notes":"Runs Fiscal Care. Primary relationship owner. TO FILL \u2014 email"},{"name":"Raizy Blumenfeld","title":"HR / Office Manager","email":"\u2014 TO FILL \u2014","phone":"732-893-7880 Ext. 2018  \u00b7  Fax 732-358-0337","notes":"TO FILL \u2014 email"}]},{"org":"Centralized Business Services (CBS)","type":"Billing Services \u00b7 AR Management","serves":"Champion City \u00b7 Eden \u00b7 Aristos \u00b7 Alpine","address":"Lakewood, NJ area (732 area code) \u2014 TO CONFIRM","web":"www.c-bservice.com","phone":"","people":[{"name":"Moshe Neumann","title":"AR Director","email":"mneumann@c-bservice.com","phone":"732-582-4950 Ext. 138  \u00b7  Fax 732-517-3640","notes":""},{"name":"Yaakov Posen","title":"AR Supervisor","email":"YPosen@c-bservice.com","phone":"732-582-4950 Ext. 147","notes":""},{"name":"Libby Lefkowits","title":"AR Supervisor","email":"LLefkowits@c-bservice.com","phone":"732-582-4950 Ext. 106  \u00b7  Fax 732-517-3640","notes":""},{"name":"Aliza Berman","title":"AR Supervisor","email":"aberman@c-bservice.com","phone":"732-582-4950 Ext. 123","notes":""},{"name":"Chashy Sonenzon","title":"MCR / HMO Supervisor","email":"cson@c-bservice.com","phone":"732-582-4950 Ext. 165","notes":"Medicare / HMO specialist"},{"name":"Rivky Link","title":"Accounts Receivable Specialist","email":"rlink@c-bservice.com","phone":"732-582-4950 Ext. 144","notes":""}]},{"org":"Medicaid Done Right","type":"Medicaid Application & Consulting","serves":"Portfolio-wide (Medicaid Pending support)","address":"13825 Icot Blvd, Suite 611, Clearwater, FL 33762","web":"www.medicaiddoneright.com","phone":"","people":[{"name":"Adam Rothman","title":"President & Partner","email":"Adam@medicaiddoneright.com","phone":"727-478-2064 \u00b7 Toll-free 888-380-1777 Ext. 104","notes":"Primary contact \u2014 leadership"},{"name":"Scott Gallagher","title":"Regional Manager \u2014 PA","email":"sgallagher@medicaiddoneright.com","phone":"727-265-3206 \u00b7 Toll-free 888-380-1777 Ext. 213","notes":"PA-specific point of contact. Mailing: P.O. Box 17755, Clearwater, FL 33762"}]}],"regionals":[{"name":"Stacie Atherton, LNHA","title":"Regional Administrator \u2014 Ohio","email":"satherton@eminentcaregroup.com","phone":"614-715-0464 (C)","notes":"","facilities":["Alpine","Aristos","Aspen Glen"],"group":"Operations"},{"name":"Shala Currey","title":"Regional Administrator \u2014 PA & NY","email":"Scurrey@eminentcaregroup.com","phone":"304-694-1211 (M)","notes":"Currently acting as Administrator at Eden.","facilities":["Champion City","Eden","Highland Park","The Pearl"],"group":"Operations"},{"name":"Amanda Seibert","title":"RDCS \u2014 Ohio","email":"aseibert@eminentcaregroup.com","phone":"419-956-2330","notes":"Regional Director of Clinical Services","facilities":["Alpine","Aristos","Aspen Glen"],"group":"Nursing / Clinical"},{"name":"Sissy Mercer","title":"RDCS \u2014 Pennsylvania","email":"smercer@eminentcaregroup.com","phone":"330-206-0828","notes":"","facilities":["Champion City","Eden"],"group":"Nursing / Clinical"},{"name":"Debra (Debbie) Diehl","title":"Regional MDS Director \u2014 PA","email":"ddiehl@eminentcaregroup.com","phone":"412-818-2317","notes":"","facilities":["Champion City","Eden"],"group":"MDS"},{"name":"OPEN POSITION","title":"Regional MDS Director \u2014 NY","email":"\u2014","phone":"\u2014","notes":"Position open \u2014 hiring","facilities":["Highland Park","The Pearl"],"group":"MDS"},{"name":"OPEN POSITION","title":"Regional MDS Director \u2014 OH","email":"\u2014","phone":"\u2014","notes":"Position open \u2014 hiring","facilities":["Alpine","Aristos","Aspen Glen"],"group":"MDS"},{"name":"Brittany Ashley","title":"Regional Marketer \u2014 Ohio","email":"bashley@eminentcaregroup.com","phone":"937-463-3617","notes":"","facilities":["Alpine","Aristos","Aspen Glen"],"group":"Marketing & Admissions"}]};
-const rosterMem = JSON.parse(JSON.stringify(ROSTER_SEED)); // preview-only edits, reset on refresh
 const rosterTel = (p) => "tel:" + String(p || "").replace(/[^0-9+]/g, "").slice(0, 15);
 const RosterFill = () => <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background:"#fdf4dd", color:"#8a6d1f", border:"1px solid #d9c489" }}>TO FILL</span>;
 const RosterVal = ({ v, kind }) => {
@@ -5229,7 +3707,54 @@ function RosterEditModal({ title, fields, initial, onCancel, onSave }) {
     </Modal>
   );
 }
-function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
+
+// One shared org-wide roster document. All logins read it; admins write it.
+const rosterDocStore = { doc: undefined, listeners: new Set(), timer: null };
+function useRosterDoc() {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const fn = () => force((x) => x + 1);
+    rosterDocStore.listeners.add(fn);
+    if (rosterDocStore.doc === undefined) {
+      rosterDocStore.doc = null; // loading sentinel handled below
+      api("/api/org/roster").then((r) => {
+        rosterDocStore.doc = r && r.data ? r.data : null;
+        rosterDocStore.loaded = true;
+        rosterDocStore.listeners.forEach((l) => l());
+      }).catch(() => { rosterDocStore.loaded = true; rosterDocStore.listeners.forEach((l) => l()); });
+    }
+    return () => rosterDocStore.listeners.delete(fn);
+  }, []);
+  const save = () => {
+    clearTimeout(rosterDocStore.timer);
+    rosterDocStore.timer = setTimeout(() => {
+      api("/api/org/roster", "PUT", { data: rosterDocStore.doc }).catch((e) => console.error("roster save:", e.message));
+    }, 400);
+  };
+  return { doc: rosterDocStore.doc, save, loading: !rosterDocStore.loaded };
+}
+function RosterImportGate({ isAdmin }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  if (!isAdmin) return <div className="text-sm py-8" style={{ color: BRAND.inkSoft }}>The roster hasn't been set up yet — an administrator imports it once.</div>;
+  return (
+    <div className="rounded-xl px-5 py-6 text-center" style={{ background: BRAND.card, border: `1px solid ${BRAND.line}` }}>
+      <div style={{ fontFamily: SERIF, fontSize: 18 }}>Set up the roster</div>
+      <div className="text-sm mt-1 mb-4" style={{ color: BRAND.inkSoft }}>Loads the full directory from the ECG Contact Roster workbook — facility profiles, teams, regionals, corporate and partners. One click, one time, all facilities.</div>
+      {err && <div className="text-sm mb-2" style={{ color: "#c0392b" }}>{err}</div>}
+      <button disabled={busy} onClick={async () => {
+        setBusy(true); setErr("");
+        try {
+          await api("/api/org/roster", "PUT", { data: ROSTER_SEED });
+          rosterDocStore.doc = JSON.parse(JSON.stringify(ROSTER_SEED));
+          rosterDocStore.listeners.forEach((l) => l());
+        } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      }} className="px-4 py-2 rounded-lg text-white text-sm" style={{ background: BRAND.ink }}>{busy ? "Importing…" : "Import roster data"}</button>
+    </div>
+  );
+}
+
+function RosterAddModal({ doc, kind, fac, partnerOrg, onCancel, onDone }) {
   // kind: "team" | "regional" | "corp" | "partnerOrg" | "partnerPerson"
   const [f, setF] = useState({});
   const [gi, setGi] = useState(0);        // corp department
@@ -5238,9 +3763,9 @@ function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
   const [serveAll, setServeAll] = useState(true);
   const [serveSel, setServeSel] = useState([fac.name]);
   const listFor = () => kind === "team" ? fac.team
-    : kind === "regional" ? rosterMem.regionals.filter((r) => r.facilities.includes(fac.name))
-    : kind === "corp" ? rosterMem.corporate[gi].people
-    : kind === "partnerPerson" ? (rosterMem.partners.find((p) => p.org === partnerOrg)?.people || [])
+    : kind === "regional" ? doc.regionals.filter((r) => r.facilities.includes(fac.name))
+    : kind === "corp" ? doc.corporate[gi].people
+    : kind === "partnerPerson" ? (doc.partners.find((p) => p.org === partnerOrg)?.people || [])
     : [];
   const labelOf = (p) => (p.name || "—") + (p.role ? ` (${p.role})` : p.title ? ` (${p.title})` : "");
   const fields = isOrg
@@ -5251,15 +3776,15 @@ function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
   const save = () => {
     if (isOrg) {
       const serves = serveAll ? "Portfolio-wide" : (serveSel.length ? serveSel.join(" · ") : fac.name);
-      rosterMem.partners.push({ org: f.org || "New partner", type: f.type || "", serves, address: f.address || "", web: f.web || "", phone: "", people: [] });
+      doc.partners.push({ org: f.org || "New partner", type: f.type || "", serves, address: f.address || "", web: f.web || "", phone: "", people: [] });
       onDone(); return;
     }
     const entry = { ...f };
     const pos = Number(after) + 1;
     if (kind === "team") fac.team.splice(pos, 0, entry);
-    else if (kind === "corp") rosterMem.corporate[gi].people.splice(pos, 0, entry);
-    else if (kind === "regional") { rosterMem.regionals.push({ ...entry, facilities: [fac.name], group: "" }); }
-    else if (kind === "partnerPerson") { const pt = rosterMem.partners.find((p) => p.org === partnerOrg); if (pt) pt.people.splice(pos, 0, entry); }
+    else if (kind === "corp") doc.corporate[gi].people.splice(pos, 0, entry);
+    else if (kind === "regional") { doc.regionals.push({ ...entry, facilities: [fac.name], group: "" }); }
+    else if (kind === "partnerPerson") { const pt = doc.partners.find((p) => p.org === partnerOrg); if (pt) pt.people.splice(pos, 0, entry); }
     onDone();
   };
   return (
@@ -5268,7 +3793,7 @@ function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
         <label className="block mb-2">
           <span className="block text-[11px] uppercase tracking-wider mb-1" style={{ color: BRAND.inkSoft }}>Department</span>
           <select style={inpStyle} value={gi} onChange={(e) => { setGi(Number(e.target.value)); setAfter(-1); }}>
-            {rosterMem.corporate.map((g, i) => <option key={g.group} value={i}>{g.group}</option>)}
+            {doc.corporate.map((g, i) => <option key={g.group} value={i}>{g.group}</option>)}
           </select>
         </label>
       )}
@@ -5286,7 +3811,7 @@ function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
           </label>
           {!serveAll && (
             <div className="grid gap-1" style={{ gridTemplateColumns: "1fr 1fr" }}>
-              {rosterMem.facilities.map((ff) => (
+              {doc.facilities.map((ff) => (
                 <label key={ff.name} className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={serveSel.includes(ff.name)}
                     onChange={(e) => setServeSel((l) => e.target.checked ? [...l, ff.name] : l.filter((x) => x !== ff.name))} /> {ff.name}
@@ -5313,16 +3838,19 @@ function RosterAddModal({ kind, fac, partnerOrg, onCancel, onDone }) {
   );
 }
 function RosterV2({ facility, isAdmin }) {
+  const { doc, save, loading } = useRosterDoc();
   const [q, setQ] = useState("");
   const [, force] = useState(0);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(null); // {kind, partnerOrg?}
   const [ptView, setPtView] = useState("boxes"); // partners: "boxes" | "table" — compare toggle
-  const fac = rosterMem.facilities.find((f) => f.name === facility.name);
+  if (loading) return <div className="text-sm py-8" style={{ color: BRAND.inkSoft }}>Loading roster…</div>;
+  if (!doc) return <RosterImportGate isAdmin={isAdmin} />;
+  const fac = doc.facilities.find((f) => f.name === facility.name);
   const needle = q.trim().toLowerCase();
   const hit = (p) => !needle || ["role","name","title","email","phone","notes"].some((k) => String(p[k] || "").toLowerCase().includes(needle));
-  const myRegionals = rosterMem.regionals.filter((r) => r.facilities.includes(facility.name) && hit(r));
-  const myPartners = rosterMem.partners.filter((p) => /portfolio|all facilities/i.test(p.serves) || String(p.serves).toLowerCase().includes(facility.name.toLowerCase()));
+  const myRegionals = doc.regionals.filter((r) => r.facilities.includes(facility.name) && hit(r));
+  const myPartners = doc.partners.filter((p) => /portfolio|all facilities/i.test(p.serves) || String(p.serves).toLowerCase().includes(facility.name.toLowerCase()));
   const PKEYS = ["ADDRESS","PHONE","WEB","BILLING"];
   const RKEYS = ["LEGAL ENTITY","EIN","NPI","MEDICARE CCN","MEDICAID PROVIDER ID","STATE LICENSE #","BED COUNT","CMS STAR RATING","CHOW / OWNERSHIP DATE"];
   const teamCols = [{k:"role"},{k:"name"},{k:"email",kind:"email"},{k:"phone",kind:"phone"},{k:"notes"}];
@@ -5339,9 +3867,6 @@ function RosterV2({ facility, isAdmin }) {
           <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: BRAND.inkSoft }} />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people, roles…" className="rounded-lg py-2 pr-3" style={{ border: `1px solid ${BRAND.line}`, paddingLeft: 32, fontSize: 13, width: 240 }} />
         </div>
-      </div>
-      <div className="text-[11px] mb-3 rounded-lg px-3 py-2" style={{ background: "#fdf4dd", border: "1px solid #d9c489", color: "#6b5a22" }}>
-        Preview — edits reset on refresh. The real build saves to the database (admin-only editing).
       </div>
 
       <RosterSection title="Facility profile" sub="Identity, contacts and regulatory identifiers">
@@ -5390,7 +3915,7 @@ function RosterV2({ facility, isAdmin }) {
           <RosterCols admin={isAdmin} />
           <thead><tr>{["Name","Title","Email","Phone","Notes"].map((h) => <th key={h} className="px-3 py-1.5 text-left" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: BRAND.inkSoft }}>{h}</th>)}{isAdmin && <th />}</tr></thead>
           <tbody>
-            {rosterMem.corporate.map((g, gi) => {
+            {doc.corporate.map((g, gi) => {
               const people = g.people.filter(hit);
               if (!people.length) return null;
               return [
@@ -5465,40 +3990,40 @@ function RosterV2({ facility, isAdmin }) {
           fields={[...PKEYS, ...RKEYS].map((k) => ({ k, label: k }))}
           initial={{ ...fac.profile }}
           onCancel={() => setEditing(null)}
-          onSave={(f) => { fac.profile = f; setEditing(null); force((x) => x + 1); }} />
+          onSave={(f) => { fac.profile = f; setEditing(null); save(); force((x) => x + 1); }} />
       )}
-      {adding && <RosterAddModal kind={adding.kind} fac={fac} partnerOrg={adding.partnerOrg} onCancel={() => setAdding(null)} onDone={() => { setAdding(null); force((x) => x + 1); }} />}
+      {adding && <RosterAddModal doc={doc} kind={adding.kind} fac={fac} partnerOrg={adding.partnerOrg} onCancel={() => setAdding(null)} onDone={() => { setAdding(null); save(); force((x) => x + 1); }} />}
       {editing && editing.kind === "corp" && (
         <RosterEditModal title="Edit corporate contact"
           fields={[{k:"name",label:"Name"},{k:"title",label:"Title"},{k:"email",label:"Email"},{k:"phone",label:"Phone"},{k:"notes",label:"Notes"}]}
-          initial={{ ...rosterMem.corporate[editing.gi].people[editing.i] }}
+          initial={{ ...doc.corporate[editing.gi].people[editing.i] }}
           onCancel={() => setEditing(null)}
-          onSave={(f) => { rosterMem.corporate[editing.gi].people[editing.i] = f; setEditing(null); force((x) => x + 1); }} />
+          onSave={(f) => { doc.corporate[editing.gi].people[editing.i] = f; setEditing(null); save(); force((x) => x + 1); }} />
       )}
       {editing && editing.kind === "regional" && (() => {
-        const idx = rosterMem.regionals.findIndex((r) => r.name === editing.name && r.title === editing.title);
+        const idx = doc.regionals.findIndex((r) => r.name === editing.name && r.title === editing.title);
         if (idx < 0) return null;
         return <RosterEditModal title="Edit regional"
           fields={[{k:"name",label:"Name"},{k:"title",label:"Title"},{k:"email",label:"Email"},{k:"phone",label:"Phone"},{k:"notes",label:"Notes"}]}
-          initial={{ ...rosterMem.regionals[idx] }}
+          initial={{ ...doc.regionals[idx] }}
           onCancel={() => setEditing(null)}
-          onSave={(f) => { rosterMem.regionals[idx] = { ...rosterMem.regionals[idx], ...f }; setEditing(null); force((x) => x + 1); }} />;
+          onSave={(f) => { doc.regionals[idx] = { ...doc.regionals[idx], ...f }; setEditing(null); save(); force((x) => x + 1); }} />;
       })()}
       {editing && editing.kind === "partner" && (() => {
-        const pt = rosterMem.partners.find((p) => p.org === editing.org);
+        const pt = doc.partners.find((p) => p.org === editing.org);
         if (!pt) return null;
         return <RosterEditModal title={"Edit contact — " + pt.org}
           fields={[{k:"name",label:"Name"},{k:"title",label:"Title"},{k:"email",label:"Email"},{k:"phone",label:"Phone"},{k:"notes",label:"Notes"}]}
           initial={{ ...pt.people[editing.i] }}
           onCancel={() => setEditing(null)}
-          onSave={(f) => { pt.people[editing.i] = f; setEditing(null); force((x) => x + 1); }} />;
+          onSave={(f) => { pt.people[editing.i] = f; setEditing(null); save(); force((x) => x + 1); }} />;
       })()}
       {editing && editing.kind === "person" && (
         <RosterEditModal title="Edit contact"
           fields={[{k:"role",label:"Role"},{k:"name",label:"Name"},{k:"email",label:"Email"},{k:"phone",label:"Phone"},{k:"notes",label:"Notes"}]}
           initial={{ ...fac.team[editing.idx] }}
           onCancel={() => setEditing(null)}
-          onSave={(f) => { fac.team[editing.idx] = f; setEditing(null); force((x) => x + 1); }} />
+          onSave={(f) => { fac.team[editing.idx] = f; setEditing(null); save(); force((x) => x + 1); }} />
       )}
     </div>
   );
@@ -5513,51 +4038,9 @@ const MODULES = [
   { key: "staffing", label: "Staffing & HR", icon: Briefcase },
   { key: "budget", label: "Department Budgets", icon: Wallet },
   { key: "rentals", label: "Rentals", icon: Package },
-  { key: "medicaid", label: "Medicaid Pending", icon: Landmark },
 ];
 
-/* ================================================================
-   FULL-SITE DESIGN PREVIEW — login bypassed, sample data, nothing saves.
-   NOT for deployment.
-   ================================================================ */
-const PREVIEW = true;
-
 export default function App() {
-  const [previewRole, setPreviewRole] = useState("admin");
-  const [previewPages, setPreviewPages] = useState(null); // null = all pages
-  if (PREVIEW) {
-    return (
-      <ErrorBoundary>
-      <div>
-        <div className="px-4 py-2 text-center text-sm flex items-center justify-center gap-3 flex-wrap" style={{ background: "#fdf4dd", borderBottom: "1px solid #e8d9a8", color: "#8a6d3f" }}>
-          <span><b>Design preview</b> — login bypassed, sample data, changes don't save.</span>
-          <span className="inline-flex items-center gap-1">Viewing as:
-            <select value={previewRole} onChange={(e) => setPreviewRole(e.target.value)} className="rounded-md px-1.5 py-0.5" style={{ border: "1px solid #e8d9a8", background: "#fff", color: "#8a6d3f" }}>
-              <option value="admin">Administrator</option>
-              <option value="corporate">Corporate</option>
-              <option value="facility">Facility staff</option>
-            </select>
-          </span>
-          {previewRole === "facility" && (
-            <span className="inline-flex items-center gap-1 flex-wrap">· Pages:
-              {MODULES.map((m) => {
-                const on = previewPages === null || previewPages.includes(m.key);
-                return (
-                  <button key={m.key} onClick={() => setPreviewPages((prev) => {
-                    const base = prev === null ? MODULES.map((x) => x.key) : prev;
-                    const next = base.includes(m.key) ? base.filter((x) => x !== m.key) : [...base, m.key];
-                    return next;
-                  })} className="rounded px-1.5 py-0.5 text-xs" style={{ border: "1px solid #e8d9a8", background: on ? "#1b2238" : "#fff", color: on ? "#fff" : "#8a7f63" }}>{m.label}</button>
-                );
-              })}
-            </span>
-          )}
-        </div>
-        <Shell key={previewRole + ":" + (previewPages ? previewPages.join(",") : "all")} auth={{ token: "preview", user: { id: "preview", email: "preview@eminentcaregroup.com", role: previewRole, facilityId: previewRole === "facility" ? "fac-aristos" : null , pages: previewRole === "facility" ? previewPages : null } }} onLogout={() => {}} />
-      </div>
-      </ErrorBoundary>
-    );
-  }
   const resetToken = (typeof window !== "undefined") ? new URLSearchParams(window.location.search).get("reset") : null;
   const [auth, setAuth] = useState(() => {
     try {
@@ -5601,9 +4084,8 @@ function Shell({ auth, onLogout }) {
       try {
         const b = await api("/api/bootstrap");
         applyFacilities(b.facilities);
-        const base = recordsToData(b.records);
-        const sample = seed();
-        setData({ ...base, ...sample, budget: base.budget || {} });
+        bedboardStore.hydrate(b.records, b.facilities);
+        setData(recordsToData(b.records));
         if (!canSeeAll && b.facilities[0]) setView(b.facilities[0].id);
       } catch { setBootErr(true); }
       finally { setLoaded(true); }
@@ -5829,7 +4311,6 @@ function Facility({ facility, module, setModule, data, update, role, allowedPage
       {module === "budget" && <DeptBudgetModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module === "census" && <BedboardModule key={facility.id} facility={facility} canImport={role === "admin"} isAdmin={role === "admin"} />}
       {module === "rehosp" && <RehospModule key={facility.id} facility={facility} isAdmin={role === "admin"} />}
-      {module === "medicaid" && <MedicaidModule key={facility.id} facility={facility} role={role} userEmail={auth.user.email} />}
       {module === "rfms" && <RFMSModule key={facility.id} facility={facility} canSign={role === "admin" || (Array.isArray(auth.user.pages) && auth.user.pages.includes("rfms:sign"))} />}
       {module === "staffing" && <StaffingModule key={facility.id} facility={facility} data={data} update={update} role={role} />}
       {module !== "staffing" && TRACKERS[module] && <TrackerModule facility={facility} moduleKey={module} data={data} update={update} />}
@@ -6419,54 +4900,6 @@ function ResetPassword({ token }) {
 
 /* ============================ Login manager (admin) ============================ */
 const ROLE_LABEL = { admin: "Administrator", corporate: "Corporate", facility: "Facility" };
-
-// PREVIEW version: works in-memory so you can feel the screen; the live site saves to the server.
-const _demoRecipients = {};
-function RecipientsManager({ facilities, onClose }){
-  const [facId, setFacId] = useState(facilities[0]?.id || "");
-  const [tick, setTick] = useState(0);
-  const [draft, setDraft] = useState("");
-  const [err, setErr] = useState("");
-  const emails = _demoRecipients[facId] = _demoRecipients[facId] || [];
-  const add = () => {
-    const e = draft.trim().toLowerCase();
-    if (!/.+@.+\..+/.test(e)) { setErr("That doesn't look like an email address."); return; }
-    setErr("");
-    if (!emails.includes(e)) emails.push(e);
-    setDraft(""); setTick(t=>t+1);
-  };
-  const remove = (e) => { _demoRecipients[facId] = emails.filter(x=>x!==e); setTick(t=>t+1); };
-  return (
-    <Modal title="Census update emails" onClose={onClose}>
-      <div style={{ fontSize:12, color:"#8a6d1f", background:"#fdf4dd", border:"1px solid #d9c489", borderRadius:8, padding:"8px 10px", marginBottom:10 }}>
-        Preview mode — the list resets on refresh here. On the live site it saves permanently.
-      </div>
-      <div style={{ fontSize:13, color:BRAND.inkSoft, marginBottom:10 }}>
-        When someone presses "Update done — email" on a facility's census, these people get the email (with the bed board attached).
-      </div>
-      <L label="Facility"><select value={facId} onChange={e=>setFacId(e.target.value)} className="w-full rounded-md px-2 py-2" style={{ border:`1px solid ${BRAND.line}` }}>
-        {facilities.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
-      </select></L>
-      <div style={{ height:10 }} />
-      <div className="flex gap-2">
-        <input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="name@eminentcaregroup.com"
-          className="flex-1 rounded-md px-3 py-2 text-sm" style={{ border:`1px solid ${BRAND.line}` }} />
-        <button onClick={add} className="text-sm rounded-md px-3 py-2 text-white" style={{ background:BRAND.ink }}>Add</button>
-      </div>
-      {err && <div style={{ fontSize:12, color:"#a33", marginTop:8 }}>{err}</div>}
-      <div style={{ marginTop:12 }}>
-        {emails.length === 0 ? <div style={{ fontSize:12, color:BRAND.inkSoft }}>No recipients yet for this facility.</div>
-          : emails.map(e => (
-            <div key={e} className="flex items-center justify-between" style={{ padding:"6px 2px", borderTop:`1px solid ${BRAND.lineSoft}`, fontSize:13 }}>
-              <span>{e}</span>
-              <button onClick={()=>remove(e)} style={{ color:BRAND.inkSoft, background:"none", border:"none", cursor:"pointer", fontSize:12 }}>remove</button>
-            </div>
-          ))}
-      </div>
-    </Modal>
-  );
-}
-
 function UserManager({ facilities, meId, onClose }) {
   const [users, setUsers] = useState(null);
   const [err, setErr] = useState("");
