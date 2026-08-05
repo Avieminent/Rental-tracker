@@ -3710,19 +3710,21 @@ function RosterEditModal({ title, fields, initial, onCancel, onSave }) {
 
 // One shared org-wide roster document. All logins read it; admins write it.
 const rosterDocStore = { doc: undefined, listeners: new Set(), timer: null };
+function rosterDocFetch() { // idempotent — safe to call from login and from the hook
+  if (rosterDocStore.doc !== undefined) return;
+  rosterDocStore.doc = null; // loading sentinel handled below
+  api("/api/org/roster").then((r) => {
+    rosterDocStore.doc = r && r.data ? r.data : null;
+    rosterDocStore.loaded = true;
+    rosterDocStore.listeners.forEach((l) => l());
+  }).catch(() => { rosterDocStore.loaded = true; rosterDocStore.listeners.forEach((l) => l()); });
+}
 function useRosterDoc() {
   const [, force] = useState(0);
   useEffect(() => {
     const fn = () => force((x) => x + 1);
     rosterDocStore.listeners.add(fn);
-    if (rosterDocStore.doc === undefined) {
-      rosterDocStore.doc = null; // loading sentinel handled below
-      api("/api/org/roster").then((r) => {
-        rosterDocStore.doc = r && r.data ? r.data : null;
-        rosterDocStore.loaded = true;
-        rosterDocStore.listeners.forEach((l) => l());
-      }).catch(() => { rosterDocStore.loaded = true; rosterDocStore.listeners.forEach((l) => l()); });
-    }
+    rosterDocFetch();
     return () => rosterDocStore.listeners.delete(fn);
   }, []);
   const save = () => {
@@ -4107,6 +4109,7 @@ function Shell({ auth, onLogout }) {
   const [adminPane, setAdminPane] = useState(null); // 'users' | 'audit' | null
 
   useEffect(() => {
+    rosterDocFetch(); // pre-fetch the directory in parallel — Roster opens instantly like every other tab
     (async () => {
       try {
         const b = await api("/api/bootstrap");
