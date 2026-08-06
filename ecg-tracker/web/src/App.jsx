@@ -55,10 +55,9 @@ const EMINENT_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAmAAAAEJCAYA
 /* ============================ Helpers ============================ */
 const uid = () => crypto?.randomUUID?.() || String(Math.random()).slice(2);
 const todayISO = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
-
 const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString());
-
-const num = (v) => (v === "" || v == null || isNaN(+v) ? null : +v);const daysBetween = (iso) => { if (!iso) return null; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? null : Math.floor((Date.now() - d) / 86400000); };
+const num = (v) => (v === "" || v == null || isNaN(+v) ? null : +v);
+const daysBetween = (iso) => { if (!iso) return null; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? null : Math.floor((Date.now() - d) / 86400000); };
 const fmtDate = (iso) => { if (!iso) return "—"; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? "—" : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); };
 
 /* ============================ Crown ============================ */
@@ -3685,6 +3684,28 @@ function RosterStackRow({ p, onEdit }) {
     </div>
   );
 }
+function RosterCardRow({ p, primary, secondary, onEdit, rowId, flash }) {
+  const name = String(p[primary] || "").trim();
+  const sub = String(p[secondary] || "").trim();
+  return (
+    <div id={rowId} className="py-2.5 flex items-start justify-between gap-3" style={{ borderTop: `1px solid ${BRAND.lineSoft}`, background: flash ? "#f5e9c8" : undefined, transition: "background 0.6s" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 14.5 }}>
+          {!name || /TO FILL/i.test(name) ? <RosterFill /> : <span style={{ fontWeight: 600 }}>{name}</span>}
+          {sub && <span style={{ color: BRAND.inkSoft, fontSize: 13 }}> — {sub}</span>}
+        </div>
+        {(p.email || p.phone) && (
+          <div style={{ fontSize: 13.5, marginTop: 3, display: "flex", flexDirection: "column", gap: 2 }}>
+            {p.email ? <span><RosterVal v={p.email} kind="email" /></span> : null}
+            {p.phone ? <span><RosterVal v={p.phone} kind="phone" /></span> : null}
+          </div>
+        )}
+        {p.notes && !/TO FILL/i.test(p.notes) && <div style={{ fontSize: 12, color: BRAND.inkSoft, marginTop: 2 }}>{p.notes}</div>}
+      </div>
+      {onEdit && <button onClick={onEdit} className="text-xs px-2 py-1.5 rounded-md shrink-0" style={{ border: `1px solid ${BRAND.line}` }}><Pencil size={13} /></button>}
+    </div>
+  );
+}
 function RosterSection({ title, sub, children, count, action }) {
   const [open, setOpen] = useState(true);
   return (
@@ -3883,7 +3904,8 @@ function RosterV2({ facility, isAdmin }) {
   }
   const jump = (id) => {
     setQ("");
-    const el = document.getElementById(id);
+    const desk = document.getElementById(id);
+    const el = (desk && desk.offsetParent !== null) ? desk : (document.getElementById(id + "-m") || desk);
     if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); setFlashId(id); setTimeout(() => setFlashId(null), 1800); }
   };
   return (
@@ -3897,7 +3919,7 @@ function RosterV2({ facility, isAdmin }) {
           <Search size={14} style={{ position: "absolute", left: 10, top: 17, color: BRAND.inkSoft }} />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people, roles…" className="rounded-lg py-2 pr-3" style={{ border: `1px solid ${BRAND.line}`, paddingLeft: 32, fontSize: 13, width: 260 }} />
           {needle && (
-            <div className="absolute rounded-lg overflow-hidden" style={{ top: "100%", right: 0, marginTop: 4, zIndex: 40, background: "#fff", border: `1px solid ${BRAND.line}`, boxShadow: "0 10px 28px rgba(0,0,0,0.15)", width: 340, maxHeight: 300, overflowY: "auto" }}>
+            <div className="absolute rounded-lg overflow-hidden" style={{ top: "100%", right: 0, marginTop: 4, zIndex: 40, background: "#fff", border: `1px solid ${BRAND.line}`, boxShadow: "0 10px 28px rgba(0,0,0,0.15)", width: 340, maxWidth: "calc(100vw - 48px)", maxHeight: 300, overflowY: "auto" }}>
               {matches.length === 0 && <div className="px-3 py-2 text-xs" style={{ color: BRAND.inkSoft }}>No matches</div>}
               {matches.slice(0, 12).map((m) => (
                 <button key={m.id} onClick={() => jump(m.id)} className="block w-full text-left px-3 py-2" style={{ borderBottom: `1px solid ${BRAND.lineSoft}` }}>
@@ -3935,7 +3957,7 @@ function RosterV2({ facility, isAdmin }) {
       </RosterSection>
 
       <RosterSection title="Facility team" count={fac.team.length + " people"} action={isAdmin ? () => setAdding({ kind: "team" }) : null}>
-        <div style={{ overflowX: "auto" }}>
+        <div className="hidden md:block" style={{ overflowX: "auto" }}>
           <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
             <RosterCols admin={isAdmin} />
             <thead><tr>{["Role","Name","Email","Phone","Notes"].map((h) => <th key={h} className="px-3 py-1.5 text-left" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: BRAND.inkSoft }}>{h}</th>)}{isAdmin && <th />}</tr></thead>
@@ -3944,16 +3966,25 @@ function RosterV2({ facility, isAdmin }) {
             </tbody>
           </table>
         </div>
+        <div className="md:hidden">
+          {fac.team.map((p, i) => <RosterCardRow key={i} rowId={"rv2-team-" + i + "-m"} flash={flashId === "rv2-team-" + i} p={p} primary="name" secondary="role" onEdit={isAdmin ? () => setEditing({ kind: "person", idx: i }) : null} />)}
+        </div>
       </RosterSection>
 
       <RosterSection title="Regionals for this facility" sub="Corporate staff assigned to this building" count={myRegionals.length + " people"} action={isAdmin ? () => setAdding({ kind: "regional" }) : null}>
+        <div className="hidden md:block">
         <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
           <RosterCols admin={isAdmin} />
           <tbody>{myRegionals.map((p, i) => <RosterPersonRow key={i} rowId={"rv2-reg-" + i} flash={flashId === "rv2-reg-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "regional", name: p.name, title: p.title }) : null} />)}</tbody>
         </table>
+        </div>
+        <div className="md:hidden">
+          {myRegionals.map((p, i) => <RosterCardRow key={i} rowId={"rv2-reg-" + i + "-m"} flash={flashId === "rv2-reg-" + i} p={p} primary="name" secondary="title" onEdit={isAdmin ? () => setEditing({ kind: "regional", name: p.name, title: p.title }) : null} />)}
+        </div>
       </RosterSection>
 
       <RosterSection title="ECG Corporate" sub="The corporate team — same at every facility" action={isAdmin ? () => setAdding({ kind: "corp" }) : null}>
+        <div className="hidden md:block">
         <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
           <RosterCols admin={isAdmin} />
           <thead><tr>{["Name","Title","Email","Phone","Notes"].map((h) => <th key={h} className="px-3 py-1.5 text-left" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: BRAND.inkSoft }}>{h}</th>)}{isAdmin && <th />}</tr></thead>
@@ -3968,6 +3999,15 @@ function RosterV2({ facility, isAdmin }) {
             })}
           </tbody>
         </table>
+        </div>
+        <div className="md:hidden">
+          {doc.corporate.map((g, gi) => (
+            <div key={g.group} className="mb-2">
+              <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.inkSoft, textTransform: "uppercase", letterSpacing: ".06em", margin: "10px 0 2px" }}>{g.group}</div>
+              {g.people.map((p, i) => <RosterCardRow key={i} rowId={"rv2-corp-" + gi + "-" + i + "-m"} flash={flashId === "rv2-corp-" + gi + "-" + i} p={p} primary="name" secondary="title" onEdit={isAdmin ? () => setEditing({ kind: "corp", gi, i }) : null} />)}
+            </div>
+          ))}
+        </div>
       </RosterSection>
 
       <RosterSection title="External partners" sub="Vendors serving this facility" count={myPartners.length + " organizations"} action={isAdmin ? () => setAdding({ kind: "partnerOrg" }) : null}>
@@ -3993,15 +4033,18 @@ function RosterV2({ facility, isAdmin }) {
                   </span>
                 </div>
                 {pt.address && <div style={{ fontSize: 12, color: BRAND.inkSoft, marginTop: 2 }}>{pt.address}</div>}
-                <table className="w-full mt-1" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
+                <div className="hidden md:block"><table className="w-full mt-1" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
                   <RosterCols admin={isAdmin} />
                   <tbody>{pt.people.map((p, i) => <RosterPersonRow key={i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />)}</tbody>
-                </table>
+                </table></div>
+                <div className="md:hidden">
+                  {pt.people.map((p, i) => <RosterCardRow key={i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i + "-m"} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} primary="name" secondary="title" onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />)}
+                </div>
               </div>
             ))}
           </>
         ) : (
-          <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <><div className="hidden md:block"><table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
             <RosterCols admin={isAdmin} />
             <thead><tr>{["Name","Title","Email","Phone","Notes"].map((h) => <th key={h} className="px-3 py-1.5 text-left" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: BRAND.inkSoft }}>{h}</th>)}{isAdmin && <th />}</tr></thead>
             <tbody>
@@ -4024,8 +4067,16 @@ function RosterV2({ facility, isAdmin }) {
                 ...pt.people.map((p, i) => <RosterPersonRow key={pt.org + i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} cols={corpCols} onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />),
               ])}
             </tbody>
-          </table>
-        )}
+          </table></div>
+          <div className="md:hidden">
+            {myPartners.map((pt) => (
+              <div key={pt.org} className="mb-2">
+                <div className="px-1 py-1.5" style={{ fontSize: 13, fontFamily: SERIF, borderTop: `1px solid ${BRAND.line}`, background: BRAND.paper }}>{pt.org}{pt.type ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "#eef1f6", color: "#44506b", border: "1px solid #ccd3e0" }}>{pt.type}</span> : null}</div>
+                {pt.people.map((p, i) => <RosterCardRow key={i} rowId={"rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i + "-m"} flash={flashId === "rv2-pt-" + pt.org.replace(/[^a-z0-9]/gi, "") + "-" + i} p={p} primary="name" secondary="title" onEdit={isAdmin ? () => setEditing({ kind: "partner", org: pt.org, i }) : null} />)}
+              </div>
+            ))}
+          </div>
+        </>)}
       </RosterSection>
 
       {editing && editing.kind === "profile" && (
