@@ -54,8 +54,7 @@ const EMINENT_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAmAAAAEJCAYA
 
 /* ============================ Helpers ============================ */
 const uid = () => crypto?.randomUUID?.() || String(Math.random()).slice(2);
-const todayISO = () => { const d = new Date(); return ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}; };const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString());
-const num = (v) => (v === "" || v == null || isNaN(+v) ? null : +v);
+const todayISO = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };const num = (v) => (v === "" || v == null || isNaN(+v) ? null : +v);
 const daysBetween = (iso) => { if (!iso) return null; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? null : Math.floor((Date.now() - d) / 86400000); };
 const fmtDate = (iso) => { if (!iso) return "—"; const d = new Date(iso + "T00:00:00"); return isNaN(d) ? "—" : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); };
 
